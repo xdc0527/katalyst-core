@@ -269,7 +269,7 @@ func (d *domainAdvisor) domainDistributeGroup(domID int, group string,
 	return result
 }
 
-func New(emitter metrics.MetricEmitter, domains domain.Domains, ccdMinMB, ccdMaxMB int, defaultDomainCapacity int,
+func NewDomainAdvisor(emitter metrics.MetricEmitter, domains domain.Domains, ccdMinMB, ccdMaxMB int, defaultDomainCapacity int,
 	capPercent int, XDomGroups []string, groupNeverThrottles []string,
 	groupCapacity map[string]int,
 ) Advisor {
