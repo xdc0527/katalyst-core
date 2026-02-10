@@ -11,7 +11,7 @@ import (
 )
 
 type EnhancedAdvisor struct {
-	inner domainAdvisor
+	inner *domainAdvisor
 }
 
 func (d *EnhancedAdvisor) GetPlan(ctx context.Context, domainsMon *monitor.DomainStats) (*plan.MBPlan, error) {
@@ -78,9 +78,10 @@ func NewEnhancedAdvisor(emitter metrics.MetricEmitter, domains domain.Domains, c
 	capPercent int, XDomGroups []string, groupNeverThrottles []string,
 	groupCapacity map[string]int,
 ) Advisor {
-	return NewDomainAdvisor(emitter, domains,
+	domainAdv := NewDomainAdvisor(emitter, domains,
 		ccdMaxMB, ccdMaxMB,
 		defaultDomainCapacity, capPercent,
 		XDomGroups, groupNeverThrottles,
 		groupCapacity)
+	return &EnhancedAdvisor{inner: domainAdv}
 }

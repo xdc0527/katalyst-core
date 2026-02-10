@@ -272,7 +272,7 @@ func (d *domainAdvisor) domainDistributeGroup(domID int, group string,
 func NewDomainAdvisor(emitter metrics.MetricEmitter, domains domain.Domains, ccdMinMB, ccdMaxMB int, defaultDomainCapacity int,
 	capPercent int, XDomGroups []string, groupNeverThrottles []string,
 	groupCapacity map[string]int,
-) Advisor {
+) *domainAdvisor {
 	// do not throttle built-in "/" anytime
 	notThrottles := sets.NewString("/")
 	notThrottles.Insert(groupNeverThrottles...)

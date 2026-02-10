@@ -1251,7 +1251,7 @@ func Test_EnhancedAdvisor_GetPlan(t *testing.T) {
 				ccdDistribute:         distributor.New(0, 20_000),
 				emitter:               &metrics.DummyMetrics{},
 			}
-			advisor := &EnhancedAdvisor{inner: *d}
+			advisor := &EnhancedAdvisor{inner: d}
 			got, err := advisor.GetPlan(tt.args.ctx, tt.args.domainsMon)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetPlan() error = %v, wantErr %v", err, tt.wantErr)
