@@ -54,6 +54,7 @@ import (
 	"github.com/kubewharf/katalyst-core/pkg/metaserver/spd"
 	"github.com/kubewharf/katalyst-core/pkg/metrics"
 	metricspool "github.com/kubewharf/katalyst-core/pkg/metrics/metrics-pool"
+	"github.com/kubewharf/katalyst-core/pkg/util/general"
 	"github.com/kubewharf/katalyst-core/pkg/util/machine"
 	metricutil "github.com/kubewharf/katalyst-core/pkg/util/metric"
 )
@@ -64,6 +65,11 @@ var qosLevel2PoolName = map[string]string{
 	consts.PodAnnotationQoSLevelSystemCores:    commonstate.PoolNameReserve,
 	consts.PodAnnotationQoSLevelDedicatedCores: commonstate.PoolNameDedicated,
 }
+
+const (
+	testPoolName1 = "test_pool_1"
+	testPoolName2 = "test_pool_2"
+)
 
 func makeContainerInfo(podUID, namespace, podName, containerName, qoSLevel string, annotations map[string]string,
 	topologyAwareAssignments types.TopologyAwareAssignment, memoryRequest float64,
@@ -117,6 +123,7 @@ func newTestMemoryAdvisor(t *testing.T, pods []*v1.Pod, checkpointDir, stateFile
 	require.NoError(t, err)
 	memoryTopology, err := machine.GenerateDummyMemoryTopology(4, 500<<30)
 	require.NoError(t, err)
+	memoryTopology.NormalMemoryCapacity = 1000 << 30
 
 	extraTopology, err := machine.GenerateDummyExtraTopology(4)
 	require.NoError(t, err)
@@ -510,6 +517,140 @@ func TestUpdate(t *testing.T) {
 			nodeMetrics:      defaultNodeMetrics,
 			numaMetrics:      defaultNumaMetrics,
 			wantAdviceResult: &types.InternalMemoryCalculationResult{},
+		},
+		{
+			name: "pool_name config case",
+			pools: map[string]*types.PoolInfo{
+				commonstate.PoolNameReserve: {
+					PoolName: commonstate.PoolNameReserve,
+					TopologyAwareAssignments: map[int]machine.CPUSet{
+						0: machine.MustParse("0"),
+						1: machine.MustParse("24"),
+					},
+					OriginalTopologyAwareAssignments: map[int]machine.CPUSet{
+						0: machine.MustParse("0"),
+						1: machine.MustParse("24"),
+					},
+				},
+				commonstate.PoolNameShare: {
+					PoolName: commonstate.PoolNameShare,
+					TopologyAwareAssignments: map[int]machine.CPUSet{
+						0: machine.MustParse("1"),
+						1: machine.MustParse("25"),
+					},
+					OriginalTopologyAwareAssignments: map[int]machine.CPUSet{
+						0: machine.MustParse("1"),
+						1: machine.MustParse("25"),
+					},
+				},
+			},
+			reclaimedEnable: true,
+			wantErr:         false,
+			containers: []*types.ContainerInfo{
+				makeContainerInfo("uid1", "default", "pod1", "c1", consts.PodAnnotationQoSLevelSharedCores, nil,
+					map[int]machine.CPUSet{
+						0: machine.MustParse("1"),
+						1: machine.MustParse("25"),
+					}, 0),
+				makeContainerInfo("uid2", "default", "pod2", "c2", consts.PodAnnotationQoSLevelSharedCores, nil,
+					map[int]machine.CPUSet{
+						0: machine.MustParse("1"),
+						1: machine.MustParse("25"),
+					}, 0),
+			},
+			pods: []*v1.Pod{
+				// specify cpuset_pool for each pod, to test pool name associated config
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pod1",
+						Namespace: "default",
+						UID:       "uid1",
+						Annotations: map[string]string{
+							consts.PodAnnotationQoSLevelKey:       consts.PodAnnotationQoSLevelSharedCores,
+							consts.PodAnnotationCPUEnhancementKey: fmt.Sprintf("{\"%s\": \"%s\"}", consts.PodAnnotationCPUEnhancementCPUSet, testPoolName1),
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name: "c1",
+							},
+						},
+					},
+					// only pods in running status will be reconciled
+					Status: v1.PodStatus{
+						Phase: v1.PodRunning,
+						ContainerStatuses: []v1.ContainerStatus{
+							{
+								Name:        "c1",
+								ContainerID: "c1",
+							},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pod2",
+						Namespace: "default",
+						UID:       "uid2",
+						Annotations: map[string]string{
+							consts.PodAnnotationQoSLevelKey:       consts.PodAnnotationQoSLevelSharedCores,
+							consts.PodAnnotationCPUEnhancementKey: fmt.Sprintf("{\"%s\": \"%s\"}", consts.PodAnnotationCPUEnhancementCPUSet, testPoolName2),
+						},
+					},
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
+							{
+								Name: "c2",
+							},
+						},
+					},
+					// only pods in running status will be reconciled
+					Status: v1.PodStatus{
+						Phase: v1.PodRunning,
+						ContainerStatuses: []v1.ContainerStatus{
+							{
+								Name:        "c2",
+								ContainerID: "c2",
+							},
+						},
+					},
+				},
+			},
+			// need to enable transparent memory offloading plugin
+			plugins:      []types.MemoryAdvisorPluginName{memadvisorplugin.TransparentMemoryOffloading},
+			wantHeadroom: *resource.NewQuantity(980<<30, resource.BinarySI),
+			nodeMetrics:  defaultNodeMetrics,
+			numaMetrics:  defaultNumaMetrics,
+			wantAdviceResult: &types.InternalMemoryCalculationResult{
+				ExtraEntries: []types.ExtraMemoryAdvices{
+					{
+						CgroupPath: "/hdfs",
+						Values: map[string]string{
+							"memory_offloading": "0",
+							"swap_max":          "false",
+						},
+					},
+				},
+				ContainerEntries: []types.ContainerMemoryAdvices{
+					{
+						PodUID:        "uid1",
+						ContainerName: "c1",
+						Values: map[string]string{
+							"memory_offloading": "0",
+							"swap_max":          "false",
+						},
+					},
+					{
+						PodUID:        "uid2",
+						ContainerName: "c2",
+						Values: map[string]string{
+							"memory_offloading": "0",
+							"swap_max":          "true",
+						},
+					},
+				},
+			},
 		},
 		{
 			name: "normal case",
@@ -1124,7 +1265,10 @@ func TestUpdate(t *testing.T) {
 				ExtraEntries: []types.ExtraMemoryAdvices{
 					{
 						CgroupPath: "/kubepods/besteffort",
-						Values:     map[string]string{string(memoryadvisor.ControlKnobKeyMemoryLimitInBytes): strconv.Itoa(240 << 30)},
+						Values: map[string]string{
+							string(memoryadvisor.ControlKnobKeyMemoryLimitInBytes): strconv.Itoa(240 << 30),
+							string(memoryadvisor.ControlKnobKeyMemoryHigh):         strconv.FormatInt(int64(0.95*float64(240<<30)), 10),
+						},
 					},
 				},
 			},
@@ -1178,7 +1322,10 @@ func TestUpdate(t *testing.T) {
 				ExtraEntries: []types.ExtraMemoryAdvices{
 					{
 						CgroupPath: "/kubepods/besteffort",
-						Values:     map[string]string{string(memoryadvisor.ControlKnobKeyMemoryLimitInBytes): strconv.Itoa(184 << 30)},
+						Values: map[string]string{
+							string(memoryadvisor.ControlKnobKeyMemoryLimitInBytes): strconv.Itoa(184 << 30),
+							string(memoryadvisor.ControlKnobKeyMemoryHigh):         strconv.FormatInt(187690070835, 10),
+						},
 					},
 				},
 			},
@@ -4312,6 +4459,7 @@ func TestUpdate(t *testing.T) {
 	mockmu := sync.Mutex{}
 
 	for _, tt := range tests {
+		general.Infof("test case: %s", tt.name)
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -4375,6 +4523,14 @@ func TestUpdate(t *testing.T) {
 			transparentMemoryOffloadingConfiguration.CgroupConfigs["/sys/fs/cgroup/hdfs"] = tmo.NewTMOConfigDetail(transparentMemoryOffloadingConfiguration.DefaultConfigurations)
 			transparentMemoryOffloadingConfiguration.CgroupConfigs["/sys/fs/cgroup/hdfs"].EnableTMO = true
 			transparentMemoryOffloadingConfiguration.CgroupConfigs["/sys/fs/cgroup/hdfs"].EnableSwap = false
+
+			// pool Name level
+			transparentMemoryOffloadingConfiguration.PoolNameConfigs[testPoolName1] = tmo.NewTMOConfigDetail(transparentMemoryOffloadingConfiguration.DefaultConfigurations)
+			transparentMemoryOffloadingConfiguration.PoolNameConfigs[testPoolName1].EnableTMO = true
+			transparentMemoryOffloadingConfiguration.PoolNameConfigs[testPoolName1].EnableSwap = false
+			transparentMemoryOffloadingConfiguration.PoolNameConfigs[testPoolName2] = tmo.NewTMOConfigDetail(transparentMemoryOffloadingConfiguration.DefaultConfigurations)
+			transparentMemoryOffloadingConfiguration.PoolNameConfigs[testPoolName2].EnableTMO = true
+			transparentMemoryOffloadingConfiguration.PoolNameConfigs[testPoolName2].EnableSwap = true
 
 			advisor.conf.GetDynamicConfiguration().TransparentMemoryOffloadingConfiguration = transparentMemoryOffloadingConfiguration
 

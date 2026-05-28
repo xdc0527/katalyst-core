@@ -33,19 +33,3 @@ func ConvertStringListToSystemEvictionRankingMetrics(metrics []string) []v1alpha
 	}
 	return res
 }
-
-func ConvertNumaEvictionRankingMetricsToStringList(metrics []v1alpha1.NumaEvictionRankingMetric) []string {
-	res := make([]string, 0, len(metrics))
-	for _, metric := range metrics {
-		res = append(res, string(metric))
-	}
-	return res
-}
-
-func ConvertSystemEvictionRankingMetricsToStringList(metrics []v1alpha1.SystemEvictionRankingMetric) []string {
-	res := make([]string, 0, len(metrics))
-	for _, metric := range metrics {
-		res = append(res, string(metric))
-	}
-	return res
-}

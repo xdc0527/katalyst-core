@@ -49,8 +49,10 @@ type GPUMemPlugin struct {
 }
 
 func NewGPUMemPlugin(base *baseplugin.BasePlugin) resourceplugin.ResourcePlugin {
+	// string(consts.ResourceGPUMemory) is the key used for state management in the QRM framework,
+	// while GPUDeviceNames are the actual resource names used to fetch the device topologies.
 	base.DefaultResourceStateGeneratorRegistry.RegisterResourceStateGenerator(string(consts.ResourceGPUMemory),
-		state.NewGenericDefaultResourceStateGenerator(gpuconsts.GPUDeviceType, base.DeviceTopologyRegistry))
+		state.NewGenericDefaultResourceStateGenerator(base.Conf.GPUDeviceNames, base.DeviceTopologyRegistry, float64(base.Conf.GPUMemoryAllocatablePerGPU.Value())))
 	return &GPUMemPlugin{
 		BasePlugin: base,
 	}
@@ -69,7 +71,7 @@ func (p *GPUMemPlugin) GetTopologyHints(ctx context.Context, req *pluginapi.Reso
 		return nil, err
 	}
 
-	_, gpuMemory, err := util.GetQuantityFromResourceRequests(req.ResourceRequests, p.ResourceName(), false)
+	_, gpuMemory, err := util.GetQuantityFromResourceRequests(req.ResourceRequests, p.ResourceName(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("getReqQuantityFromResourceReq failed with error: %v", err)
 	}
@@ -145,13 +147,14 @@ func (p *GPUMemPlugin) calculateHints(
 	machineState state.AllocationMap, gpuState state.AllocationMap,
 	req *pluginapi.ResourceRequest,
 ) (map[string]*pluginapi.ListOfTopologyHints, error) {
-	gpuTopology, numaTopologyReady, err := p.DeviceTopologyRegistry.GetDeviceTopology(gpuconsts.GPUDeviceType)
+	// A pod shouldn't request multiple GPU types simultaneously
+	if gpuNames.Len() != 1 {
+		return nil, fmt.Errorf("pod requests multiple or no gpu types: %v", gpuNames.List())
+	}
+	deviceName := gpuNames.List()[0]
+	gpuTopology, err := p.DeviceTopologyRegistry.GetDeviceTopology(deviceName)
 	if err != nil {
 		return nil, err
-	}
-
-	if !numaTopologyReady {
-		return nil, fmt.Errorf("numa topology is not ready")
 	}
 
 	perGPUMemory := gpuMemory / gpuReq
@@ -362,13 +365,9 @@ func (p *GPUMemPlugin) GetTopologyAwareAllocatableResources(ctx context.Context)
 	p.Lock()
 	defer p.Unlock()
 
-	gpuTopology, numaTopologyReady, err := p.DeviceTopologyRegistry.GetDeviceTopology(gpuconsts.GPUDeviceType)
+	gpuTopology, err := p.DeviceTopologyRegistry.GetLatestDeviceTopology(p.Conf.GPUDeviceNames)
 	if err != nil {
 		return nil, err
-	}
-
-	if !numaTopologyReady {
-		return nil, fmt.Errorf("numa topology is not ready")
 	}
 
 	topologyAwareAllocatableQuantityList := make([]*pluginapi.TopologyAwareQuantity, 0, len(gpuTopology.Devices))
@@ -379,9 +378,6 @@ func (p *GPUMemPlugin) GetTopologyAwareAllocatableResources(ctx context.Context)
 		aggregatedCapacityQuantity += float64(p.Conf.GPUMemoryAllocatablePerGPU.Value())
 		gpuMemoryAllocatablePerGPUNUMA := float64(p.Conf.GPUMemoryAllocatablePerGPU.Value())
 		gpuMemoryCapacityPerGPUNUMA := float64(p.Conf.GPUMemoryAllocatablePerGPU.Value())
-		if deviceInfo.Health != deviceplugin.Healthy {
-			gpuMemoryAllocatablePerGPUNUMA = 0
-		}
 		if len(deviceInfo.NumaNodes) > 0 {
 			gpuMemoryAllocatablePerGPUNUMA = gpuMemoryAllocatablePerGPUNUMA / float64(len(deviceInfo.NumaNodes))
 			gpuMemoryCapacityPerGPUNUMA = gpuMemoryCapacityPerGPUNUMA / float64(len(deviceInfo.NumaNodes))
@@ -462,7 +458,7 @@ func (p *GPUMemPlugin) Allocate(
 		return nil, err
 	}
 
-	_, gpuMemory, err := util.GetQuantityFromResourceRequests(resourceReq.ResourceRequests, p.ResourceName(), false)
+	_, gpuMemory, err := util.GetQuantityFromResourceRequests(resourceReq.ResourceRequests, p.ResourceName(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("getReqQuantityFromResourceReq failed with error: %v", err)
 	}
@@ -520,16 +516,11 @@ func (p *GPUMemPlugin) Allocate(
 
 	general.Infof("deviceReq: %v", deviceReq.String())
 
-	// Get GPU topology
-	gpuTopology, numaTopologyReady, err := p.DeviceTopologyRegistry.GetDeviceTopology(gpuconsts.GPUDeviceType)
+	// Get GPU topology using the specific device resource name
+	gpuTopology, err := p.DeviceTopologyRegistry.GetDeviceTopology(deviceReq.DeviceName)
 	if err != nil {
 		general.Warningf("failed to get gpu topology: %v", err)
 		return nil, fmt.Errorf("failed to get gpu topology: %v", err)
-	}
-
-	if !numaTopologyReady {
-		general.Warningf("numa topology is not ready")
-		return nil, fmt.Errorf("numa topology is not ready")
 	}
 
 	// Use the strategy framework to allocate GPU memory

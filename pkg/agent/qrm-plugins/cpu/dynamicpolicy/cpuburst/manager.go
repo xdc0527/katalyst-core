@@ -26,8 +26,9 @@ import (
 
 	"github.com/kubewharf/katalyst-api/pkg/consts"
 	"github.com/kubewharf/katalyst-core/pkg/agent/qrm-plugins/cpu/util"
+	qrmutil "github.com/kubewharf/katalyst-core/pkg/agent/qrm-plugins/util"
+	"github.com/kubewharf/katalyst-core/pkg/config"
 	"github.com/kubewharf/katalyst-core/pkg/config/agent/dynamic"
-	"github.com/kubewharf/katalyst-core/pkg/config/generic"
 	"github.com/kubewharf/katalyst-core/pkg/metaserver"
 	"github.com/kubewharf/katalyst-core/pkg/util/cgroup/common"
 	"github.com/kubewharf/katalyst-core/pkg/util/cgroup/manager"
@@ -36,7 +37,7 @@ import (
 )
 
 type Manager interface {
-	UpdateCPUBurst(qosConf *generic.QoSConfiguration, dynamicConfig *dynamic.DynamicAgentConfiguration) error
+	UpdateCPUBurst(conf *config.Configuration, dynamicConfig *dynamic.DynamicAgentConfiguration) error
 }
 
 type managerImpl struct {
@@ -63,7 +64,7 @@ func newManager(metaServer *metaserver.MetaServer) *managerImpl {
 }
 
 // UpdateCPUBurst calculates the value of cpu burst and sets it to the cgroup.
-func (m *managerImpl) UpdateCPUBurst(qosConf *generic.QoSConfiguration, dynamicConfig *dynamic.DynamicAgentConfiguration) error {
+func (m *managerImpl) UpdateCPUBurst(conf *config.Configuration, dynamicConfig *dynamic.DynamicAgentConfiguration) error {
 	if m.metaServer == nil {
 		return fmt.Errorf("nil metaServer")
 	}
@@ -74,19 +75,31 @@ func (m *managerImpl) UpdateCPUBurst(qosConf *generic.QoSConfiguration, dynamicC
 		return fmt.Errorf("error getting pod list: %v", err)
 	}
 
+	qosConf := conf.QoSConfiguration
+	if qosConf == nil {
+		return fmt.Errorf("QoS configuration is nil")
+	}
+
 	var errList []error
 
+	isSoleSharedCoresPod := util.IsSoleSharedCoresPod(conf, podList, dynamicConfig)
+
 	for _, pod := range podList {
-		cpuBurstPolicy, err := util.GetPodCPUBurstPolicy(qosConf, pod, dynamicConfig)
+		cpuBurstPolicy, err := util.GetPodCPUBurstPolicy(conf, pod, dynamicConfig, isSoleSharedCoresPod)
 		if err != nil {
 			errList = append(errList, fmt.Errorf("error getting cpu burst policy for pod %s: %v", pod.Name, err))
 			continue
 		}
 
+		var mainContainerName string
+		if conf.EnableCPUBurstForMainContainerOnly {
+			mainContainerName = qrmutil.GetMainContainer(pod, conf.MainContainerAnnotationKey)
+		}
+
 		switch cpuBurstPolicy {
 		case consts.PodAnnotationCPUEnhancementCPUBurstPolicyClosed:
 			// For closed policy, we just set the cpu burst value to be 0.
-			if err = m.updateCPUBurstByPercent(0, pod); err != nil {
+			if err = m.updateCPUBurstByPercent(0, pod, mainContainerName); err != nil {
 				errList = append(errList, fmt.Errorf("error setting cpu burst for policy %s for pod %s: %v",
 					consts.PodAnnotationCPUEnhancementCPUBurstPolicyClosed, pod.Name, err))
 			}
@@ -100,7 +113,7 @@ func (m *managerImpl) UpdateCPUBurst(qosConf *generic.QoSConfiguration, dynamicC
 				continue
 			}
 
-			if err = m.updateCPUBurstByPercent(cpuBurstPercent, pod); err != nil {
+			if err = m.updateCPUBurstByPercent(cpuBurstPercent, pod, mainContainerName); err != nil {
 				errList = append(errList, fmt.Errorf("error setting cpu burst for policy %s for pod %s: %v",
 					consts.PodAnnotationCPUEnhancementCPUBurstPolicyStatic, pod.Name, err))
 			}
@@ -116,13 +129,20 @@ func (m *managerImpl) UpdateCPUBurst(qosConf *generic.QoSConfiguration, dynamicC
 
 // updateCPUBurstByPercent updates the value of cpu burst for static policy by taking the
 // cpu quota from cgroup and calculating the cpu burst value by taking cpu quota * percent / 100.
-func (m *managerImpl) updateCPUBurstByPercent(percent float64, pod *v1.Pod) error {
+// If the main container name is not empty, we update the cpu burst only for that container,
+// otherwise we update the cpu burst for all containers.
+func (m *managerImpl) updateCPUBurstByPercent(percent float64, pod *v1.Pod, mainContainerName string) error {
 	var errList []error
 	podUID := string(pod.GetUID())
 	podName := pod.Name
 
 	for _, container := range pod.Spec.Containers {
 		containerName := container.Name
+		// skip updating the container if the container is not the main container
+		if mainContainerName != "" && containerName != mainContainerName {
+			continue
+		}
+
 		containerID, err := m.metaServer.GetContainerID(podUID, containerName)
 		if err != nil {
 			general.Errorf("get container id failed, pod: %s, podName: %s, container: %s(%s), err: %v", podUID, podName, containerName, containerID, err)

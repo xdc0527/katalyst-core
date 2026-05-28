@@ -154,6 +154,11 @@ const (
 	MetricScalingCPUFreqKHZ   = "scaling.cur.freq.khz"
 )
 
+// memory bandwidth metrics
+const (
+	MetricRealtimeMB = "realtime.mb"
+)
+
 // Image filesystem metrics
 const (
 	MetricsImageFsAvailable  = "available.rootfs.system"
@@ -228,6 +233,13 @@ const (
 	MetricZramUsedTotal      = "zram.used.total.system"
 	MetricZramComprDataSize  = "zram.compr.usage.system"
 	MetricZramOriginDataSize = "zram.origin.usage.system"
+)
+
+// System disk metrics
+const (
+	MetricDiskTotal = "disk.total.system"
+	MetricDiskFree  = "disk.free.system"
+	MetricDiskUsage = "disk.usage.system"
 )
 
 // container cpu metrics

@@ -18,13 +18,14 @@ package machine
 
 import (
 	"fmt"
-	"sort"
+	"reflect"
 	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/strings/slices"
+	pluginapi "k8s.io/kubelet/pkg/apis/resourceplugin/v1alpha1"
 
+	"github.com/kubewharf/katalyst-core/pkg/metrics"
 	"github.com/kubewharf/katalyst-core/pkg/util/general"
 )
 
@@ -44,13 +45,23 @@ type DeviceTopologyRegistry struct {
 
 	// lastDeviceTopologies is a mapping of device name to their respective last device topology
 	lastDeviceTopologies map[string]*DeviceTopology
+
+	// topologyChangeNotifiers is a list of callbacks to invoke when topology changes
+	topologyChangeNotifiers []func()
+
+	// emitter is used to emit metrics
+	emitter metrics.MetricEmitter
 }
 
-func NewDeviceTopologyRegistry() *DeviceTopologyRegistry {
+func NewDeviceTopologyRegistry(emitter metrics.MetricEmitter) *DeviceTopologyRegistry {
+	if emitter == nil {
+		emitter = metrics.DummyMetrics{}
+	}
 	return &DeviceTopologyRegistry{
 		deviceTopologyProviders:         make(map[string]DeviceTopologyProvider),
 		deviceTopologyAffinityProviders: make(map[string]DeviceAffinityProvider),
 		lastDeviceTopologies:            make(map[string]*DeviceTopology),
+		emitter:                         emitter,
 	}
 }
 
@@ -154,67 +165,125 @@ func (r *DeviceTopologyRegistry) RegisterTopologyAffinityProvider(
 	r.deviceTopologyAffinityProviders[deviceName] = deviceAffinityProvider
 }
 
+// RegisterTopologyChangeNotifier registers a callback that will be invoked whenever any device topology actually changes.
+func (r *DeviceTopologyRegistry) RegisterTopologyChangeNotifier(notifier func()) {
+	r.mux.Lock()
+	defer r.mux.Unlock()
+	r.topologyChangeNotifiers = append(r.topologyChangeNotifiers, notifier)
+}
+
 // SetDeviceTopology sets the device topology for the specified device name.
 func (r *DeviceTopologyRegistry) SetDeviceTopology(deviceName string, deviceTopology *DeviceTopology) error {
 	r.mux.Lock()
-	defer r.mux.Unlock()
 
 	topologyProvider, ok := r.deviceTopologyProviders[deviceName]
 	if !ok {
+		r.mux.Unlock()
 		return fmt.Errorf("no device topology provider found for device %s", deviceName)
 	}
 
 	topologyAffinityProvider, ok := r.deviceTopologyAffinityProviders[deviceName]
 	if ok {
-		topologyAffinityProvider.SetDeviceAffinity(deviceTopology)
+		generateAndSetDeviceAffinity(topologyAffinityProvider, deviceTopology, r.emitter)
 		general.Infof("set device affinity provider for device %s, %v", deviceName, deviceTopology)
 	} else {
 		general.Infof("no device affinity provider found for device %s", deviceName)
 	}
 
-	// Cache the device topology
-	r.lastDeviceTopologies[deviceName] = deviceTopology
+	// Capture notifiers to invoke outside the lock to avoid deadlocks
+	var notifiers []func()
+	err := topologyProvider.SetDeviceTopology(deviceTopology)
+	if err != nil {
+		general.Errorf("failed to set device topology for device %s, err: %v, skip triggering notifiers", deviceName, err)
+	} else {
+		// Check if topology has actually changed (DeviceTopology is small, so reflect.DeepEqual is fast)
+		changed := !reflect.DeepEqual(r.lastDeviceTopologies[deviceName], deviceTopology)
 
-	return topologyProvider.SetDeviceTopology(deviceTopology)
+		// Cache the device topology only when SetDeviceTopology succeeds
+		r.lastDeviceTopologies[deviceName] = deviceTopology
+
+		if changed {
+			general.Infof("device topology changed for device %s, triggering %d notifiers", deviceName, len(r.topologyChangeNotifiers))
+			notifiers = append(notifiers, r.topologyChangeNotifiers...)
+		} else {
+			general.Infof("device topology unchanged for device %s, skip triggering notifiers", deviceName)
+		}
+	}
+	r.mux.Unlock()
+
+	// Invoke notifiers outside the lock
+	for _, notifier := range notifiers {
+		notifier()
+	}
+
+	return err
 }
 
-// GetAllDeviceTopologyProviders returns all registered device topology providers.
-func (r *DeviceTopologyRegistry) GetAllDeviceTopologyProviders() map[string]DeviceTopologyProvider {
-	r.mux.RLock()
-	defer r.mux.RUnlock()
-
-	return r.deviceTopologyProviders
+func (r *DeviceTopologyRegistry) getDeviceTopology(deviceName string) (*DeviceTopology, error) {
+	provider, ok := r.deviceTopologyProviders[deviceName]
+	if !ok {
+		return nil, fmt.Errorf("no device topology provider found for device %s", deviceName)
+	}
+	return provider.GetDeviceTopology()
 }
 
 // GetDeviceTopology gets the device topology for the specified device name.
-func (r *DeviceTopologyRegistry) GetDeviceTopology(deviceName string) (*DeviceTopology, bool, error) {
+func (r *DeviceTopologyRegistry) GetDeviceTopology(deviceName string) (*DeviceTopology, error) {
 	r.mux.RLock()
 	defer r.mux.RUnlock()
 
-	provider, ok := r.deviceTopologyProviders[deviceName]
-	if !ok {
-		return nil, false, fmt.Errorf("no device topology provider found for device %s", deviceName)
+	return r.getDeviceTopology(deviceName)
+}
+
+// GetDeviceTopologies gets device topologies for the given device names.
+// It returns a map of device name to their respective device topology.
+func (r *DeviceTopologyRegistry) GetDeviceTopologies(deviceNames []string) (map[string]*DeviceTopology, error) {
+	r.mux.RLock()
+	defer r.mux.RUnlock()
+
+	topologies := make(map[string]*DeviceTopology)
+	for _, deviceName := range deviceNames {
+		topology, err := r.getDeviceTopology(deviceName)
+		if err != nil {
+			general.Warningf("failed to get topology for device %s: %v", deviceName, err)
+			continue
+		}
+		topologies[deviceName] = topology
 	}
-	return provider.GetDeviceTopology()
+
+	if len(topologies) == 0 {
+		return nil, fmt.Errorf("failed to get any device topology")
+	}
+
+	return topologies, nil
+}
+
+// GetLatestDeviceTopology gets device topologies for the given device names and picks the latest one.
+func (r *DeviceTopologyRegistry) GetLatestDeviceTopology(deviceNames []string) (*DeviceTopology, error) {
+	topologiesMap, err := r.GetDeviceTopologies(deviceNames)
+	if err != nil {
+		return nil, err
+	}
+
+	latestTopology := PickLatestDeviceTopology(topologiesMap)
+	if latestTopology == nil {
+		return nil, fmt.Errorf("no latest device topology")
+	}
+
+	return latestTopology, nil
 }
 
 // GetDeviceNUMAAffinity retrieves a map of a certain device A to the list of devices in device B that it has an affinity with.
 // A device is considered to have an affinity with another device if they are on the exact same NUMA node(s)
 func (r *DeviceTopologyRegistry) GetDeviceNUMAAffinity(deviceA, deviceB string) (map[string][]string, error) {
-	deviceTopologyKey, numaReady, err := r.GetDeviceTopology(deviceA)
+	deviceTopologyKey, err := r.GetDeviceTopology(deviceA)
 	if err != nil {
 		return nil, fmt.Errorf("error getting device topology for device %s: %v", deviceA, err)
 	}
-	if !numaReady {
-		return nil, fmt.Errorf("device topology for device %s is not ready", deviceA)
-	}
 
-	deviceTopologyValue, numaReady, err := r.GetDeviceTopology(deviceB)
+	deviceTopologyValue, err := r.GetDeviceTopology(deviceB)
 	if err != nil {
 		return nil, fmt.Errorf("error getting device topology for device %s: %v", deviceB, err)
-	}
-	if !numaReady {
-		return nil, fmt.Errorf("device topology for device %s is not ready", deviceB)
 	}
 
 	deviceAffinity := make(map[string][]string)
@@ -241,105 +310,87 @@ type DeviceTopology struct {
 	// For example, if devices have affinity based on the NUMA and SOCKET, and NUMA has higher priority than SOCKET,
 	// the priority dimensions are ["NUMA", "SOCKET"].
 	PriorityDimensions []string
+	// UpdateTime is the timestamp when the topology was last updated.
+	UpdateTime int64
+}
+
+func (t *DeviceTopology) IsDeviceHealthy(id string) (bool, bool) {
+	deviceInfo, ok := t.Devices[id]
+	if !ok {
+		return false, false
+	}
+	return deviceInfo.Health == pluginapi.Healthy, true
 }
 
 // GroupDeviceAffinity forms a topology graph such that all devices within a DeviceIDs group have an affinity with each other.
-// They are differentiated by their affinity priority value.
+// The outer slice is ordered from the highest priority to the lowest priority.
 // E.g. Output:
 //
-//	{
-//		0: {{"gpu-0", "gpu-1"}, {"gpu-2", "gpu-3"}},
-//		1: {{"gpu-0", "gpu-1", "gpu-2", "gpu-3"}}
-//	}
+//	[
+//		{{"gpu-0", "gpu-1"}, {"gpu-2", "gpu-3"}},
+//		{{"gpu-0", "gpu-1", "gpu-2", "gpu-3"}},
+//	]
 //
-// means that gpu-0 and gpu-1 have an affinity with each other, gpu-2 and gpu-3 have an affinity with each other in affinity priority 0.
-// and gpu-0, gpu-1, gpu-2, and gpu-3 have an affinity with each other in affinity priority 1.
-func (t *DeviceTopology) GroupDeviceAffinity() map[int][]DeviceIDs {
-	deviceAffinityGroup := make(map[int][]DeviceIDs)
-	for deviceId, deviceInfo := range t.Devices {
-		for priority, affinityDeviceIDs := range deviceInfo.DeviceAffinity {
-			// Add itself in the group if it is not already included
-			if !slices.Contains(affinityDeviceIDs, deviceId) {
-				affinityDeviceIDs = append(affinityDeviceIDs, deviceId)
-			}
-			// Sort the strings for easier deduplication
-			sort.Strings(affinityDeviceIDs)
-
-			priorityLevel := priority.GetPriorityLevel()
-			if _, ok := deviceAffinityGroup[priorityLevel]; !ok {
-				deviceAffinityGroup[priorityLevel] = make([]DeviceIDs, 0)
-			}
-
-			// Add the affinityDeviceIDs to the priority level if it is not already there
-			if !containsGroup(deviceAffinityGroup[priorityLevel], affinityDeviceIDs) {
-				deviceAffinityGroup[priorityLevel] = append(deviceAffinityGroup[priorityLevel], affinityDeviceIDs)
-			}
-		}
+// means that gpu-0 and gpu-1 have an affinity with each other, gpu-2 and gpu-3 have an affinity with each other in the highest affinity priority.
+// and gpu-0, gpu-1, gpu-2, and gpu-3 have an affinity with each other in the next lower affinity priority.
+func (t *DeviceTopology) GroupDeviceAffinity() [][]DeviceIDs {
+	if t == nil || len(t.Devices) == 0 || len(t.PriorityDimensions) == 0 {
+		return nil
 	}
-	return deviceAffinityGroup
+
+	priorityDimensionGroups := make([][]DeviceIDs, 0, len(t.PriorityDimensions))
+	for _, name := range t.PriorityDimensions {
+		// devicesGroup is a mapping of dimension value to the device IDs
+		devicesGroup := make(map[string]sets.String)
+
+		// Get all the devices of the same dimension value
+		for id, info := range t.Devices {
+			if len(info.Dimensions) == 0 {
+				continue
+			}
+
+			value, ok := info.Dimensions[name]
+			if !ok {
+				continue
+			}
+
+			if _, ok = devicesGroup[value]; !ok {
+				devicesGroup[value] = sets.NewString()
+			}
+
+			devicesGroup[value] = devicesGroup[value].Insert(id)
+		}
+
+		// If there are no devices in a certain group, do not add them in the priorityDimensionGroups
+		if len(devicesGroup) == 0 {
+			continue
+		}
+
+		priorityDevicesGroup := make([]DeviceIDs, 0, len(devicesGroup))
+		// Iterate through all the devices and group them based on their value
+		for _, ids := range devicesGroup {
+			priorityDevicesGroup = append(priorityDevicesGroup, ids.UnsortedList())
+		}
+
+		priorityDimensionGroups = append(priorityDimensionGroups, priorityDevicesGroup)
+	}
+
+	return priorityDimensionGroups
 }
 
-func containsGroup(groups []DeviceIDs, candidate DeviceIDs) bool {
-	for _, g := range groups {
-		if slices.Equal(g, candidate) {
-			return true
-		}
-	}
-	return false
-}
-
-// DeviceAffinity is the map of priority level to the other deviceIds that a particular deviceId has an affinity with
-type DeviceAffinity map[AffinityPriority]DeviceIDs
+// DeviceDimensions stores per-device dimension attributes, keyed by canonicalized dimension name.
+// Example: {"numa": "0", "socket": "1"}.
+// The key of the DeviceDimensions should be mapped to one of the PriorityDimensions
+type DeviceDimensions map[string]string
 
 type DeviceInfo struct {
-	Health         string
-	NumaNodes      []int
-	DeviceAffinity DeviceAffinity
+	Health     string
+	NumaNodes  []int
+	Dimensions DeviceDimensions
 }
 
-func (i DeviceInfo) GetDimensions() []Dimension {
-	dimensions := make([]Dimension, 0)
-	for priority := range i.DeviceAffinity {
-		dimensions = append(dimensions, priority.Dimension)
-	}
-
-	sort.Slice(dimensions, func(i, j int) bool {
-		return dimensions[i].Name < dimensions[j].Name
-	})
-
-	return dimensions
-}
-
-// AffinityPriority represents the level of affinity that a deviceID has with another deviceID.
-// It contains the actual priority level and the dimension of the affinity.
-// The priority level is the value of the priority. The lower the value, the higher the priority.
-type AffinityPriority struct {
-	PriorityLevel int
-	Dimension     Dimension
-}
-
-func (a *AffinityPriority) GetPriorityLevel() int {
-	return a.PriorityLevel
-}
-
-func (a *AffinityPriority) GetDimension() Dimension {
-	return a.Dimension
-}
-
-// Dimension represents the dimension of the affinity.
-// Name is the name of the dimension. E.g. NUMA, SOCKET, etc.
-// Value is the id of the dimension. E.g. numa-0, numa-1, socket-0, socket-1, etc.
-type Dimension struct {
-	Name  string
-	Value string
-}
-
-func (d *Dimension) GetName() string {
-	return d.Name
-}
-
-func (d *Dimension) GetValue() string {
-	return d.Value
+func (i DeviceInfo) GetDimensions() DeviceDimensions {
+	return i.Dimensions
 }
 
 type DeviceIDs []string
@@ -352,29 +403,20 @@ func (i DeviceInfo) GetNUMANodes() []int {
 }
 
 type DeviceTopologyProvider interface {
-	GetDeviceTopology() (*DeviceTopology, bool, error)
+	GetDeviceTopology() (*DeviceTopology, error)
 	SetDeviceTopology(*DeviceTopology) error
 }
 
 type deviceTopologyProviderImpl struct {
-	mutex         sync.RWMutex
-	resourceNames []string
+	mutex sync.RWMutex
 
-	deviceTopology    *DeviceTopology
-	numaTopologyReady bool
+	deviceTopology *DeviceTopology
 }
 
 var _ DeviceTopologyProvider = (*deviceTopologyProviderImpl)(nil)
 
-func NewDeviceTopologyProvider(resourceNames []string) DeviceTopologyProvider {
-	deviceTopology := &DeviceTopology{
-		Devices: make(map[string]DeviceInfo),
-	}
-
-	return &deviceTopologyProviderImpl{
-		deviceTopology: deviceTopology,
-		resourceNames:  resourceNames,
-	}
+func NewDeviceTopologyProvider() DeviceTopologyProvider {
+	return &deviceTopologyProviderImpl{}
 }
 
 func (p *deviceTopologyProviderImpl) SetDeviceTopology(deviceTopology *DeviceTopology) error {
@@ -385,30 +427,32 @@ func (p *deviceTopologyProviderImpl) SetDeviceTopology(deviceTopology *DeviceTop
 	}
 
 	p.deviceTopology = deviceTopology
-	p.numaTopologyReady = checkDeviceNUMATopologyReady(deviceTopology)
 	return nil
 }
 
-func (p *deviceTopologyProviderImpl) GetDeviceTopology() (*DeviceTopology, bool, error) {
+func (p *deviceTopologyProviderImpl) GetDeviceTopology() (*DeviceTopology, error) {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
 
 	if p.deviceTopology == nil {
-		return nil, false, fmt.Errorf("deviceTopology is nil when getting device topology")
+		return nil, fmt.Errorf("deviceTopology is not initialized by SetDeviceTopology")
 	}
 
-	return p.deviceTopology, p.numaTopologyReady, nil
+	return p.deviceTopology, nil
 }
 
-func checkDeviceNUMATopologyReady(topology *DeviceTopology) bool {
-	if topology == nil {
-		return false
-	}
+// PickLatestDeviceTopology selects the latest device topology from the given map based on UpdateTime.
+func PickLatestDeviceTopology(topologies map[string]*DeviceTopology) *DeviceTopology {
+	var latest *DeviceTopology
+	for _, t := range topologies {
+		if t == nil {
+			continue
+		}
 
-	for _, device := range topology.Devices {
-		if device.NumaNodes == nil {
-			return false
+		if latest == nil || t.UpdateTime > latest.UpdateTime {
+			latest = t
 		}
 	}
-	return true
+
+	return latest
 }

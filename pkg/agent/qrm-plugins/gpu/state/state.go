@@ -37,7 +37,8 @@ type AllocationInfo struct {
 }
 
 type Allocation struct {
-	// Quantity refers to the amount of device allocated
+	// Quantity refers to the device count or the quantity of resource allocated.
+	// Note: sum of quantity may be greater than allocatable because some pods can share devices.
 	Quantity  float64 `json:"quantity"`
 	NUMANodes []int   `json:"numa_nodes"`
 }
@@ -62,12 +63,17 @@ type (
 )
 
 type AllocationState struct {
-	PodEntries PodEntries `json:"pod_entries"`
+	// Allocatable refers to the total quantity of resource or device count that can be allocated.
+	Allocatable float64    `json:"allocatable"`
+	PodEntries  PodEntries `json:"pod_entries"`
 }
 
-type AllocationMap map[string]*AllocationState // AllocationMap keyed by device name i.e. GPU-fef8089b-4820-abfc-e83e-94318197576e
+type AllocationMap map[string]*AllocationState // AllocationMap keyed by device id i.e. GPU-fef8089b-4820-abfc-e83e-94318197576e
 
-type AllocationResourcesMap map[v1.ResourceName]AllocationMap // AllocationResourcesMap keyed by resource name i.e. v1.ResourceName("nvidia.com/gpu")
+// AllocationResourcesMap keyed by resource name.
+// For devices, they are keyed by device type (e.g. rdma_device, gpu_device).
+// For resources, they are keyed by the resource name (e.g. resource.katalyst.kubewharf.io/gpu_memory).
+type AllocationResourcesMap map[v1.ResourceName]AllocationMap
 
 func (i *AllocationInfo) String() string {
 	if i == nil {
@@ -224,7 +230,8 @@ func (as *AllocationState) Clone() *AllocationState {
 	}
 
 	return &AllocationState{
-		PodEntries: as.PodEntries.Clone(),
+		PodEntries:  as.PodEntries.Clone(),
+		Allocatable: as.Allocatable,
 	}
 }
 

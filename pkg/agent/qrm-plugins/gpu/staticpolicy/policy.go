@@ -149,6 +149,8 @@ func (p *StaticPolicy) Start() (err error) {
 		periodicalhandler.ReadyToStartHandlersByGroup(appqrm.QRMGPUPluginPeriodicalHandlerGroupName)
 	}, 5*time.Second, p.stopCh)
 
+	p.BasePlugin.Run(p.stopCh)
+
 	return nil
 }
 
@@ -257,8 +259,12 @@ func (p *StaticPolicy) RemovePod(
 		return nil, fmt.Errorf("RemovePod got nil req")
 	}
 
+	// It's possible that ensureState fails because there is no topology information yet.
+	// We just log the error and return an empty response to avoid spamming errors,
+	// because if state is not initialized, there are no pods to remove anyway.
 	if err := p.ensureState(""); err != nil {
-		return nil, fmt.Errorf("ensure state failed: %v", err)
+		general.InfofV(4, "ensure state failed (probably no devices yet): %v", err)
+		return &pluginapi.RemovePodResponse{}, nil
 	}
 
 	p.Lock()
@@ -382,8 +388,12 @@ func (p *StaticPolicy) GetTopologyAwareAllocatableResources(
 		return nil, fmt.Errorf("GetTopologyAwareAllocatableResources got nil req")
 	}
 
+	// It's possible that ensureState fails because there is no topology information yet.
+	// We just log the error and return an empty response to avoid spamming errors,
+	// because if state is not initialized, there are no allocatable resources.
 	if err := p.ensureState(""); err != nil {
-		return nil, fmt.Errorf("ensure state failed: %v", err)
+		general.InfofV(4, "ensure state failed (probably no devices yet): %v", err)
+		return &pluginapi.GetTopologyAwareAllocatableResourcesResponse{}, nil
 	}
 
 	p.RLock()
@@ -546,10 +556,6 @@ func (p *StaticPolicy) clearResidualState(
 	_ metrics.MetricEmitter,
 	_ *metaserver.MetaServer,
 ) {
-	if p.GetState() == nil {
-		return
-	}
-
 	general.Infof("exec")
 	var (
 		err     error
@@ -563,6 +569,10 @@ func (p *StaticPolicy) clearResidualState(
 
 	if p.MetaServer == nil {
 		general.Errorf("nil metaServer")
+		return
+	}
+
+	if p.GetState() == nil {
 		return
 	}
 

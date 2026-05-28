@@ -19,13 +19,6 @@ package eviction
 import (
 	"github.com/kubewharf/katalyst-core/pkg/config/agent/dynamic/crd"
 	"github.com/kubewharf/katalyst-core/pkg/consts"
-	"github.com/kubewharf/katalyst-core/pkg/util"
-)
-
-// Fake metrics are not fetched from meta-server
-const (
-	FakeMetricQoSLevel = "qos.pod"
-	FakeMetricPriority = "priority.pod"
 )
 
 const (
@@ -62,12 +55,10 @@ const (
 )
 
 var (
-	// FakeEvictionRankingMetrics is fake metrics to rank pods
-	FakeEvictionRankingMetrics = []string{FakeMetricQoSLevel, FakeMetricPriority}
 	// DefaultNumaEvictionRankingMetrics is the default metrics used to rank pods for eviction at the NUMA level
-	DefaultNumaEvictionRankingMetrics = append(FakeEvictionRankingMetrics, consts.MetricsMemTotalPerNumaContainer)
+	DefaultNumaEvictionRankingMetrics = append(DefaultEvictionRankingMetrics, consts.MetricsMemTotalPerNumaContainer)
 	// DefaultSystemEvictionRankingMetrics is the default metrics used to rank pods for eviction at the system level
-	DefaultSystemEvictionRankingMetrics = append(FakeEvictionRankingMetrics, consts.MetricMemUsageContainer)
+	DefaultSystemEvictionRankingMetrics = append(DefaultEvictionRankingMetrics, consts.MetricMemUsageContainer)
 )
 
 type MemoryPressureEvictionConfiguration struct {
@@ -136,11 +127,11 @@ func (c *MemoryPressureEvictionConfiguration) ApplyConfiguration(conf *crd.Dynam
 		}
 
 		if len(config.NumaEvictionRankingMetrics) > 0 {
-			c.NumaEvictionRankingMetrics = util.ConvertNumaEvictionRankingMetricsToStringList(config.NumaEvictionRankingMetrics)
+			c.NumaEvictionRankingMetrics = ConvertNumaEvictionRankingMetricsToStringList(config.NumaEvictionRankingMetrics)
 		}
 
 		if len(config.SystemEvictionRankingMetrics) > 0 {
-			c.SystemEvictionRankingMetrics = util.ConvertSystemEvictionRankingMetricsToStringList(config.SystemEvictionRankingMetrics)
+			c.SystemEvictionRankingMetrics = ConvertSystemEvictionRankingMetricsToStringList(config.SystemEvictionRankingMetrics)
 		}
 
 		if config.GracePeriod != nil {

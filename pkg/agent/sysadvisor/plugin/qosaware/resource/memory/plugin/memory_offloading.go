@@ -19,6 +19,8 @@ package plugin
 import (
 	"context"
 	"math"
+	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -30,6 +32,7 @@ import (
 
 	"github.com/kubewharf/katalyst-api/pkg/apis/config/v1alpha1"
 	katalystapiconsts "github.com/kubewharf/katalyst-api/pkg/consts"
+	"github.com/kubewharf/katalyst-core/pkg/agent/qrm-plugins/commonstate"
 	"github.com/kubewharf/katalyst-core/pkg/agent/qrm-plugins/memory/dynamicpolicy/memoryadvisor"
 	"github.com/kubewharf/katalyst-core/pkg/agent/sysadvisor/metacache"
 	"github.com/kubewharf/katalyst-core/pkg/agent/sysadvisor/plugin/qosaware/resource/helper"
@@ -201,6 +204,9 @@ type transparentMemoryOffloading struct {
 	emitter             metrics.MetricEmitter
 	containerTmoEngines map[katalystcoreconsts.PodContainerName]TmoEngine
 	cgpathTmoEngines    map[string]TmoEngine
+
+	lastDyingCGReclaimTime  time.Time
+	enableDyingMemcgReclaim bool
 }
 
 type TmoEngine interface {
@@ -470,6 +476,8 @@ func NewTransparentMemoryOffloading(conf *config.Configuration, extraConfig inte
 		emitter:             emitter,
 		containerTmoEngines: make(map[consts.PodContainerName]TmoEngine),
 		cgpathTmoEngines:    make(map[string]TmoEngine),
+		// enableDyingMemcgReclaim: getEnvBool(DyingMemcgReclaimEnv, true),
+		enableDyingMemcgReclaim: conf.QoSAwarePluginConfiguration.EnableDyingMemcgReclaim,
 	}
 }
 
@@ -497,6 +505,11 @@ func (tmo *transparentMemoryOffloading) Reconcile(status *types.MemoryPressureSt
 				general.Infof("DaemonSet pod %s is considered as system_cores qos level", pod.UID)
 			}
 		}
+
+		cpuEnhancement := tmo.conf.QoSConfiguration.GetQoSEnhancementKVs(pod, map[string]string{}, katalystapiconsts.PodAnnotationCPUEnhancementKey)
+		poolName := commonstate.GetSpecifiedPoolName(qos, cpuEnhancement[katalystapiconsts.PodAnnotationCPUEnhancementCPUSet])
+		general.Infof("Get pool name %s for pod uid: %s", poolName, pod.UID)
+
 		for _, containerStatus := range pod.Status.ContainerStatuses {
 			containerInfo := &types.ContainerInfo{
 				PodUID:        string(pod.UID),
@@ -512,6 +525,7 @@ func (tmo *transparentMemoryOffloading) Reconcile(status *types.MemoryPressureSt
 			if !exist {
 				tmo.containerTmoEngines[podContainerName] = NewTmoEngineInstance(containerInfo, tmo.metaServer, tmo.emitter, tmo.conf.GetDynamicConfiguration().TransparentMemoryOffloadingConfiguration)
 			}
+
 			// load QoSLevelConfig
 			if helper.IsValidQosLevel(containerInfo.QoSLevel) {
 				if tmoConfigDetail, exist := tmo.conf.GetDynamicConfiguration().QoSLevelConfigs[katalystapiconsts.QoSLevel(containerInfo.QoSLevel)]; exist {
@@ -524,6 +538,30 @@ func (tmo *transparentMemoryOffloading) Reconcile(status *types.MemoryPressureSt
 						tmo.containerTmoEngines[podContainerName].GetConf().PolicyName)
 				}
 			}
+
+			// PoolName Override QosLevel Config
+			if poolName != commonstate.EmptyOwnerPoolName {
+				if tmoConfigDetail, exist := tmo.conf.GetDynamicConfiguration().PoolNameConfigs[poolName]; exist {
+					tmo.containerTmoEngines[podContainerName].LoadConf(tmoConfigDetail)
+					general.Infof("Load Pool %s TMO config for podContainerName %s, enableTMO: %v, enableSwap: %v, interval: %v, policy: %v",
+						poolName, podContainerName,
+						tmo.containerTmoEngines[podContainerName].GetConf().EnableTMO,
+						tmo.containerTmoEngines[podContainerName].GetConf().EnableSwap,
+						tmo.containerTmoEngines[podContainerName].GetConf().Interval,
+						tmo.containerTmoEngines[podContainerName].GetConf().PolicyName)
+				}
+			} else {
+				general.Infof("Pool name is empty for pod %s, skip load pool name config", pod.Name)
+			}
+
+			// disable TMO if the Pod is numa exclusive and is not reclaimable
+			enableReclaim, _ := helper.PodEnableReclaim(context.Background(), tmo.metaServer, containerInfo.PodUID, true)
+			if !enableReclaim {
+				tmo.containerTmoEngines[podContainerName].GetConf().EnableTMO = false
+				tmo.containerTmoEngines[podContainerName].GetConf().EnableSwap = false
+				general.Infof("container with podContainerName: %s is required to disable TMO since it is not reclaimable", podContainerName)
+			}
+
 			// load SPD conf if exists
 			tmoIndicator := &v1alpha1.TransparentMemoryOffloadingIndicators{}
 			isBaseline, err := tmo.metaServer.ServiceProfilingManager.ServiceExtendedIndicator(context.Background(), pod.ObjectMeta, tmoIndicator)
@@ -540,14 +578,6 @@ func (tmo *transparentMemoryOffloading) Reconcile(status *types.MemoryPressureSt
 						tmo.containerTmoEngines[podContainerName].GetConf().Interval,
 						tmo.containerTmoEngines[podContainerName].GetConf().PolicyName)
 				}
-			}
-
-			// disable TMO if the Pod is numa exclusive and is not reclaimable
-			enableReclaim, _ := helper.PodEnableReclaim(context.Background(), tmo.metaServer, containerInfo.PodUID, true)
-			if !enableReclaim {
-				tmo.containerTmoEngines[podContainerName].GetConf().EnableTMO = false
-				tmo.containerTmoEngines[podContainerName].GetConf().EnableSwap = false
-				general.Infof("container with podContainerName: %s is required to disable TMO since it is not reclaimable", podContainerName)
 			}
 
 			// disable TMO if the container is in TMO block list
@@ -656,6 +686,48 @@ func (tmo *transparentMemoryOffloading) GetAdvices() types.InternalMemoryCalcula
 			},
 		}
 		result.ExtraEntries = append(result.ExtraEntries, entry)
+	}
+
+	if !tmo.enableDyingMemcgReclaim {
+		return result
+	}
+
+	cgroupPaths := make([]string, 0)
+	onlineBurstableCgroupPath := path.Join(common.CgroupFSMountPoint, memoryadvisor.OnlineBurstableCgroupPath)
+	cgroupPaths = append(cgroupPaths, onlineBurstableCgroupPath)
+
+	// add offline-besteffort-* cgroup paths
+	// traverse all paths
+	directory := path.Join(common.CgroupFSMountPoint, memoryadvisor.KubePodsCgroupPath)
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		general.Infof("Failed to read directory %s: %v", directory, err)
+		return result
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), memoryadvisor.OfflineBestEffortPrefix) {
+			cgroupPaths = append(cgroupPaths, path.Join(directory, entry.Name()))
+		}
+	}
+
+	general.Infof("DyingMemcg paths to be processed: %v", cgroupPaths)
+
+	currentTime := time.Now()
+	if tmo.lastDyingCGReclaimTime.IsZero() || currentTime.Sub(tmo.lastDyingCGReclaimTime) >= memoryadvisor.MemCgReclaimDefaultIntervalSeconds*time.Second {
+		general.Infof("Trigger dying memcg reclaim for cgroup paths: %v after %v seconds", cgroupPaths, memoryadvisor.MemCgReclaimDefaultIntervalSeconds)
+
+		tmo.lastDyingCGReclaimTime = currentTime
+		// Note: trigger qrm-plugin
+		for _, cgroupPath := range cgroupPaths {
+			entry := types.ExtraMemoryAdvices{
+				CgroupPath: cgroupPath,
+				Values: map[string]string{
+					string(memoryadvisor.ControlKnowKeyDyingMemcgReclaim): consts.ControlKnobON,
+				},
+			}
+			result.ExtraEntries = append(result.ExtraEntries, entry)
+		}
 	}
 
 	return result

@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/samber/lo"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -379,7 +380,8 @@ func (p *DynamicPolicy) handleAdvisorResp(advisorResp *advisorsvc.ListAndWatchRe
 		}
 	}
 
-	resourcesMachineState, err := state.GenerateMachineStateFromPodEntries(p.state.GetMachineInfo(), podResourceEntries, p.state.GetMachineState(), p.state.GetReservedMemory())
+	resourcesMachineState, err := state.GenerateMachineStateFromPodEntries(p.state.GetMachineInfo(), p.state.GetMemoryTopology(), podResourceEntries,
+		p.state.GetMachineState(), p.state.GetReservedMemory(), p.extraResourceNames)
 	if err != nil {
 		return fmt.Errorf("calculate machineState by updated pod entries failed with error: %v", err)
 	}
@@ -389,6 +391,43 @@ func (p *DynamicPolicy) handleAdvisorResp(advisorResp *advisorsvc.ListAndWatchRe
 	if err := p.state.StoreState(); err != nil {
 		general.ErrorS(err, "store state failed")
 	}
+	return nil
+}
+
+func (p *DynamicPolicy) handleAdvisorMemoryHigh(
+	_ *config.Configuration,
+	_ interface{},
+	_ *dynamicconfig.DynamicAgentConfiguration,
+	emitter metrics.MetricEmitter,
+	metaServer *metaserver.MetaServer,
+	entryName, subEntryName string,
+	calculationInfo *advisorsvc.CalculationInfo, podResourceEntries state.PodResourceEntries,
+) error {
+	memoryHighStr := calculationInfo.CalculationResult.Values[string(memoryadvisor.ControlKnobKeyMemoryHigh)]
+	memoryHigh, err := strconv.ParseInt(memoryHighStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse %s: %s failed with error: %v", memoryadvisor.ControlKnobKeyMemoryHigh, memoryHighStr, err)
+	}
+
+	if !cgroups.IsCgroup2UnifiedMode() {
+		general.Infof("memory.high is not supported in cgroupv1 mode")
+		return nil
+	}
+
+	if calculationInfo.CgroupPath != "" {
+		if err = cgroupmgr.ApplyMemoryWithRelativePath(calculationInfo.CgroupPath, &common.MemoryData{
+			HighInBytes: memoryHigh,
+		}); err != nil {
+			return fmt.Errorf("apply memory.high failed with error: %v", err)
+		}
+
+		_ = emitter.StoreInt64(util.MetricNameMemoryHandleAdvisorMemoryHigh, memoryHigh,
+			metrics.MetricTypeNameRaw, metrics.ConvertMapToTags(map[string]string{
+				"cgroupPath": calculationInfo.CgroupPath,
+			})...)
+		return nil
+	}
+
 	return nil
 }
 
@@ -969,5 +1008,66 @@ func (p *DynamicPolicy) handleAdvisorMemoryOffloading(_ *config.Configuration,
 			"subEntryName": subEntryName,
 			"cgroupPath":   calculationInfo.CgroupPath,
 		})...)
+	return nil
+}
+
+// handleAdvisorDyingMemcgReclaim handles dying memcg reclaim from memory-advisor
+func (p *DynamicPolicy) handleAdvisorDyingMemcgReclaim(_ *config.Configuration,
+	_ interface{},
+	_ *dynamicconfig.DynamicAgentConfiguration,
+	emitter metrics.MetricEmitter,
+	metaServer *metaserver.MetaServer,
+	entryName, subEntryName string,
+	calculationInfo *advisorsvc.CalculationInfo, podResourceEntries state.PodResourceEntries,
+) error {
+	var absCGPath string
+	var dyingMemcgReclaimWorkName string
+
+	if calculationInfo.CgroupPath != "" {
+		dyingMemcgReclaimWorkName = util.GetCgroupAsyncWorkName(calculationInfo.CgroupPath, memoryPluginAsyncWorkTopicDyingMemcgReclaim)
+		absCGPath = calculationInfo.CgroupPath
+	} else {
+		return fmt.Errorf("cgroup path is empty")
+	}
+
+	// set swap max before trigger memory offloading
+	swapMax := calculationInfo.CalculationResult.Values[string(memoryadvisor.ControlKnobKeySwapMax)]
+	if swapMax == consts.ControlKnobON {
+		err := cgroupmgr.SetSwapMaxWithAbsolutePathRecursive(absCGPath)
+		if err != nil {
+			general.Infof("Failed to set swap max, err: %v", err)
+		}
+	} else {
+		err := cgroupmgr.DisableSwapMaxWithAbsolutePathRecursive(absCGPath)
+		if err != nil {
+			general.Infof("Failed to disable swap, err: %v", err)
+		}
+	}
+
+	isEnableDyingMemcgReclaim := calculationInfo.CalculationResult.Values[string(memoryadvisor.ControlKnowKeyDyingMemcgReclaim)] == consts.ControlKnobON
+	if !isEnableDyingMemcgReclaim {
+		return nil
+	}
+
+	_, mems, err := cgroupmgr.GetEffectiveCPUSetWithAbsolutePath(absCGPath)
+	if err != nil {
+		return fmt.Errorf("GetEffectiveCPUSetWithAbsolutePath failed with error: %v", err)
+	}
+	general.Infof("dyingMemcgReclaimWithAbsolutePath mems: %v", mems)
+
+	// start an asynchronous work to execute dying memcg reclaim
+	err = p.defaultAsyncLimitedWorkers.AddWork(
+		&asyncworker.Work{
+			Name:        dyingMemcgReclaimWorkName,
+			UID:         uuid.NewUUID(),
+			Fn:          cgroupmgr.DyingMemcgReclaimWithAbsolutePath,
+			Params:      []interface{}{absCGPath, emitter, entryName, subEntryName, mems},
+			DeliveredAt: time.Now(),
+		}, asyncworker.DuplicateWorkPolicyOverride,
+	)
+	if err != nil {
+		return fmt.Errorf("add work: %s pod: %s container: %s cgroup: %s failed with error: %v", dyingMemcgReclaimWorkName, entryName, subEntryName, absCGPath, err)
+	}
+
 	return nil
 }

@@ -261,7 +261,8 @@ func (ra *RealtimeOvercommitmentAdvisor) syncAllocatableCPU(reserved resource.Qu
 }
 
 func (ra *RealtimeOvercommitmentAdvisor) syncAllocatableMemory(reserved resource.Quantity) {
-	capacity := resource.NewQuantity(int64(ra.metaServer.MemoryCapacity), resource.BinarySI)
+	// Use NormalMemoryCapacity which excludes static hugepages for accurate allocatable memory calculation
+	capacity := resource.NewQuantity(int64(ra.metaServer.NormalMemoryCapacity), resource.BinarySI)
 
 	capacity.Sub(reserved)
 
@@ -364,7 +365,7 @@ func (ra *RealtimeOvercommitmentAdvisor) GetOvercommitRatio() (map[v1.ResourceNa
 	defer cancel()
 	node, err := ra.metaServer.GetNode(ctx)
 	if err != nil {
-		klog.Error("GetOvercommitRatio getNode fail: %v", err)
+		klog.Errorf("GetOvercommitRatio getNode fail: %v", err)
 		return nil, err
 	}
 	if cpuOvercommitRatioAnno, ok := node.Annotations[apiconsts.NodeAnnotationCPUOvercommitRatioKey]; ok {

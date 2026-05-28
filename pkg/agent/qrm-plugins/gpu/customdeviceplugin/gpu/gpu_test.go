@@ -44,6 +44,7 @@ func generateTestConfiguration(t *testing.T) *config.Configuration {
 	tmpDir := t.TempDir()
 	conf.QRMPluginSocketDirs = []string{tmpDir}
 	conf.CheckpointManagerDir = tmpDir
+	conf.KubeletDevicePluginPath = tmpDir
 
 	return conf
 }
@@ -152,23 +153,23 @@ func TestGPUDevicePlugin_UpdateAllocatableAssociatedDevices(t *testing.T) {
 
 	// Verify device topology is updated
 	gpuDevicePlugin := devicePlugin.(*GPUDevicePlugin)
-	deviceTopology, numaTopologyReady, err := gpuDevicePlugin.DeviceTopologyRegistry.GetDeviceTopology(gpuconsts.GPUDeviceType)
+	deviceTopology, err := gpuDevicePlugin.DeviceTopologyRegistry.GetDeviceTopology("test-gpu")
 	assert.NoError(t, err)
-	assert.True(t, numaTopologyReady)
 	assert.NotNil(t, deviceTopology)
 
 	expectedDeviceTopology := &machine.DeviceTopology{
 		Devices: map[string]machine.DeviceInfo{
 			"test-gpu-0": {
-				NumaNodes:      []int{0},
-				DeviceAffinity: make(map[machine.AffinityPriority]machine.DeviceIDs),
+				NumaNodes:  []int{0},
+				Dimensions: make(map[string]string),
 			},
 			"test-gpu-1": {
-				NumaNodes:      []int{1},
-				DeviceAffinity: make(map[machine.AffinityPriority]machine.DeviceIDs),
+				NumaNodes:  []int{1},
+				Dimensions: make(map[string]string),
 			},
 		},
 	}
+	expectedDeviceTopology.UpdateTime = deviceTopology.UpdateTime
 
 	assert.Equal(t, expectedDeviceTopology, deviceTopology)
 }
@@ -314,7 +315,7 @@ func TestGPUDevicePlugin_AllocateAssociatedDevice(t *testing.T) {
 			}
 
 			if tt.deviceTopology != nil {
-				err := basePlugin.DeviceTopologyRegistry.SetDeviceTopology(gpuconsts.GPUDeviceType, tt.deviceTopology)
+				err := basePlugin.DeviceTopologyRegistry.SetDeviceTopology("test-gpu", tt.deviceTopology)
 				assert.NoError(t, err)
 			}
 

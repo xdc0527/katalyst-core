@@ -26,7 +26,19 @@ const (
 	ControlKnobKeyBalanceNumaMemory  MemoryControlKnobName = "balance_numa_memory"
 	ControlKnobKeySwapMax            MemoryControlKnobName = "swap_max"
 	ControlKnowKeyMemoryOffloading   MemoryControlKnobName = "memory_offloading"
+	ControlKnowKeyDyingMemcgReclaim  MemoryControlKnobName = "dying_memcg_reclaim"
 	ControlKnobKeyMemoryNUMAHeadroom MemoryControlKnobName = "memory_numa_headroom"
+	ControlKnobKeyMemoryHigh         MemoryControlKnobName = "memory_high"
+)
+
+const (
+	KubePodsCgroupPath        = "kubepods"
+	OfflineBestEffortPrefix   = "offline-besteffort-" // follows some number, such as kubepods/offline-besteffort-0
+	OnlineBurstableCgroupPath = "kubepods/burstable"
+)
+
+const (
+	MemCgReclaimDefaultIntervalSeconds = 300
 )
 
 type MemoryNUMAHeadroom map[int]int64

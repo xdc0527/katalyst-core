@@ -25,22 +25,26 @@ import (
 )
 
 type GPUOptions struct {
-	PolicyName                 string
-	GPUDeviceNames             []string
-	GPUMemoryAllocatablePerGPU string
-	SkipGPUStateCorruption     bool
-	RDMADeviceNames            []string
+	PolicyName                      string
+	GPUDeviceNames                  []string
+	GPUMemoryAllocatablePerGPU      string
+	SkipGPUStateCorruption          bool
+	RDMADeviceNames                 []string
+	RequiredDeviceAffinity          bool
+	EnableKubeletCheckpointFallback bool
 
 	GPUStrategyOptions *gpustrategy.GPUStrategyOptions
 }
 
 func NewGPUOptions() *GPUOptions {
 	return &GPUOptions{
-		PolicyName:                 "static",
-		GPUDeviceNames:             []string{"nvidia.com/gpu"},
-		GPUMemoryAllocatablePerGPU: "100",
-		RDMADeviceNames:            []string{},
-		GPUStrategyOptions:         gpustrategy.NewGPUStrategyOptions(),
+		PolicyName:                      "static",
+		GPUDeviceNames:                  []string{"nvidia.com/gpu"},
+		GPUMemoryAllocatablePerGPU:      "100",
+		RDMADeviceNames:                 []string{},
+		GPUStrategyOptions:              gpustrategy.NewGPUStrategyOptions(),
+		RequiredDeviceAffinity:          true,
+		EnableKubeletCheckpointFallback: true,
 	}
 }
 
@@ -55,6 +59,10 @@ func (o *GPUOptions) AddFlags(fss *cliflag.NamedFlagSets) {
 	fs.BoolVar(&o.SkipGPUStateCorruption, "skip-gpu-state-corruption",
 		o.SkipGPUStateCorruption, "skip gpu state corruption, and it will be used after updating state properties")
 	fs.StringSliceVar(&o.RDMADeviceNames, "rdma-resource-names", o.RDMADeviceNames, "The name of the RDMA resource")
+	fs.BoolVar(&o.RequiredDeviceAffinity, "gpu-required-device-affinity", o.RequiredDeviceAffinity,
+		"required device affinity, and when true it will cause pods to admit fail if unable to meet device affinity")
+	fs.BoolVar(&o.EnableKubeletCheckpointFallback, "enable-kubelet-checkpoint-fallback", o.EnableKubeletCheckpointFallback,
+		"enable fallback to kubelet device plugin checkpoint for device allocation.")
 	o.GPUStrategyOptions.AddFlags(fss)
 }
 
@@ -71,5 +79,7 @@ func (o *GPUOptions) ApplyTo(conf *qrmconfig.GPUQRMPluginConfig) error {
 	if err := o.GPUStrategyOptions.ApplyTo(conf.GPUStrategyConfig); err != nil {
 		return err
 	}
+	conf.RequiredDeviceAffinity = o.RequiredDeviceAffinity
+	conf.EnableKubeletCheckpointFallback = o.EnableKubeletCheckpointFallback
 	return nil
 }

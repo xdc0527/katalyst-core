@@ -36,6 +36,7 @@ import (
 	"github.com/kubewharf/katalyst-api/pkg/plugins/skeleton"
 	"github.com/kubewharf/katalyst-core/cmd/katalyst-agent/app/agent"
 	"github.com/kubewharf/katalyst-core/cmd/katalyst-agent/app/agent/qrm"
+	"github.com/kubewharf/katalyst-core/pkg/agent/qrm-plugins/accompanyresource"
 	"github.com/kubewharf/katalyst-core/pkg/agent/qrm-plugins/advisorsvc"
 	"github.com/kubewharf/katalyst-core/pkg/agent/qrm-plugins/commonstate"
 	cpuconsts "github.com/kubewharf/katalyst-core/pkg/agent/qrm-plugins/cpu/consts"
@@ -80,6 +81,8 @@ const (
 
 	healthCheckTolerationTimes = 3
 )
+
+var AccompanyResourceRegistry = accompanyresource.NewRegistry()
 
 // DynamicPolicy is the policy that's used by default;
 // it will consider the dynamic running information to calculate
@@ -134,7 +137,9 @@ type DynamicPolicy struct {
 	podDebugAnnoKeys                          []string
 	podAnnotationKeptKeys                     []string
 	podLabelKeptKeys                          []string
-	NUMABindingResultAnnotationKey            string
+	numaBindingResultAnnotationKey            string
+	numaNumberAnnotationKey                   string
+	numaIDsAnnotationKey                      string
 	transitionPeriod                          time.Duration
 
 	reservedReclaimedCPUsSize                 int
@@ -221,7 +226,9 @@ func NewDynamicPolicy(agentCtx *agent.GenericContext, conf *config.Configuration
 		podDebugAnnoKeys:               conf.PodDebugAnnoKeys,
 		podAnnotationKeptKeys:          conf.PodAnnotationKeptKeys,
 		podLabelKeptKeys:               conf.PodLabelKeptKeys,
-		NUMABindingResultAnnotationKey: conf.NUMABindingResultAnnotationKey,
+		numaBindingResultAnnotationKey: conf.NUMABindingResultAnnotationKey,
+		numaNumberAnnotationKey:        conf.NUMANumberAnnotationKey,
+		numaIDsAnnotationKey:           conf.NUMAIDsAnnotationKey,
 		transitionPeriod:               30 * time.Second,
 		reservedReclaimedCPUsSize:      general.Max(reservedReclaimedCPUsSize, agentCtx.KatalystMachineInfo.NumNUMANodes),
 	}
@@ -1063,6 +1070,11 @@ func (p *DynamicPolicy) RemovePod(ctx context.Context,
 		return nil, err
 	}
 
+	if err := AccompanyResourceRegistry.ReleaseAccompanyResource(req); err != nil {
+		general.ErrorS(err, "failed to release accompany resource", "podUID", req.PodUid)
+		return nil, fmt.Errorf("failed to release accompany resource %v", err)
+	}
+
 	aErr := p.adjustAllocationEntries(false)
 	if aErr != nil {
 		general.ErrorS(aErr, "adjustAllocationEntries failed", "podUID", req.PodUid)
@@ -1141,10 +1153,15 @@ func (p *DynamicPolicy) initAdvisorClientConn() (err error) {
 
 func (p *DynamicPolicy) initHintOptimizers() error {
 	var err error
-	p.sharedCoresNUMABindingHintOptimizer, err = registry.SharedCoresHintOptimizerRegistry.HintOptimizer(p.conf.SharedCoresHintOptimizerPolicies,
-		p.generateHintOptimizerFactoryOptions())
+	hintOptimizerFactoryOptions := p.generateHintOptimizerFactoryOptions()
+
+	p.sharedCoresNUMABindingHintOptimizer, err = registry.SharedCoresHintOptimizerRegistry.HintOptimizerWithFilters(
+		p.conf.SharedCoresHintOptimizerPolicies,
+		p.conf.SharedCoresHintFilterPolicies,
+		hintOptimizerFactoryOptions,
+	)
 	if err != nil {
-		return fmt.Errorf("SharedCoresHintOptimizerRegistry.HintOptimizer failed with error: %v", err)
+		return fmt.Errorf("SharedCoresHintOptimizerRegistry.HintOptimizerWithFilters failed with error: %v", err)
 	}
 
 	p.dedicatedCoresNUMABindingHintOptimizer, err = registry.DedicatedCoresHintOptimizerRegistry.HintOptimizer(p.conf.DedicatedCoresHintOptimizerPolicies,

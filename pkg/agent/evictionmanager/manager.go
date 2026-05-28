@@ -42,6 +42,7 @@ import (
 	pluginapi "github.com/kubewharf/katalyst-api/pkg/protocol/evictionplugin/v1alpha1"
 	endpointpkg "github.com/kubewharf/katalyst-core/pkg/agent/evictionmanager/endpoint"
 	"github.com/kubewharf/katalyst-core/pkg/agent/evictionmanager/plugin"
+	"github.com/kubewharf/katalyst-core/pkg/agent/evictionmanager/plugin/cpu"
 	"github.com/kubewharf/katalyst-core/pkg/agent/evictionmanager/plugin/memory"
 	"github.com/kubewharf/katalyst-core/pkg/agent/evictionmanager/plugin/network"
 	"github.com/kubewharf/katalyst-core/pkg/agent/evictionmanager/plugin/resource"
@@ -152,6 +153,7 @@ func NewInnerEvictionPluginInitializers() map[string]plugin.InitFunc {
 	innerEvictionPluginInitializers[rootfs.EvictionPluginNamePodRootfsPressure] = rootfs.NewPodRootfsPressureEvictionPlugin
 	innerEvictionPluginInitializers[network.EvictionPluginNameNetwork] = network.NewNICEvictionPlugin
 	innerEvictionPluginInitializers[rootfs.EvictionPluginNamePodRootfsOveruse] = rootfs.NewPodRootfsOveruseEvictionPlugin
+	innerEvictionPluginInitializers[cpu.EvictionPluginNameSystemCPUPressure] = cpu.NewCPUSystemPressureEvictionPlugin
 	return innerEvictionPluginInitializers
 }
 
@@ -325,6 +327,8 @@ func (m *EvictionManger) Run(ctx context.Context) {
 	general.RegisterHeartbeatCheck(evictionManagerHealthCheckName, syncTolerationTurns*m.conf.EvictionManagerSyncPeriod,
 		general.HealthzCheckStateNotReady, syncTolerationTurns*m.conf.EvictionManagerSyncPeriod)
 	general.RegisterHeartbeatCheck(reportTaintHealthCheckName, reportTaintToleration,
+		general.HealthzCheckStateNotReady, reportTaintToleration)
+	general.RegisterHeartbeatCheck(reportCNRTaintHealthCheckName, reportTaintToleration,
 		general.HealthzCheckStateNotReady, reportTaintToleration)
 	m.podKiller.Start(ctx)
 	m.podNotifier.Start(ctx)

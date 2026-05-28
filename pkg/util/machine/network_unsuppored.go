@@ -32,3 +32,11 @@ func GetExtraNetworkInfo(_ *global.MachineInfoConfiguration) (*ExtraNetworkInfo,
 func DoNetNS(nsName, netNSDirAbsPath string, cb func(sysFsDir string) error) error {
 	return cb("")
 }
+
+func GetInterfaceChannelsCombinedCount(name string) (int, error) {
+	return 0, nil
+}
+
+func IsHostNetworkBonding() (bool, error) {
+	return false, nil
+}

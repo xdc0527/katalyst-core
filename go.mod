@@ -20,7 +20,7 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/h2non/gock v1.2.0
 	github.com/klauspost/cpuid/v2 v2.2.6
-	github.com/kubewharf/katalyst-api v0.5.9-0.20260108125536-85e136f5902c
+	github.com/kubewharf/katalyst-api v0.5.11-0.20260423040236-f1a2330d266e
 	github.com/moby/sys/mountinfo v0.6.2
 	github.com/montanaflynn/stats v0.7.1
 	github.com/opencontainers/runc v1.1.6
@@ -36,9 +36,11 @@ require (
 	github.com/samber/lo v1.39.0
 	github.com/slok/kubewebhook v0.11.0
 	github.com/smartystreets/goconvey v1.6.4
+	github.com/spf13/afero v1.6.0
 	github.com/spf13/cobra v1.6.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.8.3
+	github.com/vishvananda/netlink v1.2.1-beta.2
 	github.com/vishvananda/netns v0.0.4
 	go.opentelemetry.io/otel v0.20.0
 	go.opentelemetry.io/otel/exporters/metric/prometheus v0.20.0
@@ -47,6 +49,7 @@ require (
 	go.opentelemetry.io/otel/sdk/export/metric v0.20.0
 	go.opentelemetry.io/otel/sdk/metric v0.20.0
 	go.uber.org/atomic v1.9.0
+	golang.org/x/exp v0.0.0-20220303212507-bbda1eaf7a17
 	golang.org/x/sys v0.29.0
 	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8
 	gonum.org/v1/gonum v0.8.2
@@ -132,7 +135,6 @@ require (
 	github.com/smartystreets/assertions v1.1.0 // indirect
 	github.com/stretchr/objx v0.5.0 // indirect
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
-	github.com/vishvananda/netlink v1.1.0 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.4 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.4 // indirect
 	go.etcd.io/etcd/client/v3 v3.5.4 // indirect
@@ -146,7 +148,6 @@ require (
 	go.uber.org/zap v1.19.1 // indirect
 	golang.org/x/arch v0.0.0-20201008161808-52c3e6f60cff // indirect
 	golang.org/x/crypto v0.14.0 // indirect
-	golang.org/x/exp v0.0.0-20220303212507-bbda1eaf7a17 // indirect
 	golang.org/x/net v0.17.0 // indirect
 	golang.org/x/oauth2 v0.7.0 // indirect
 	golang.org/x/sync v0.2.0 // indirect
@@ -196,7 +197,7 @@ replace (
 	k8s.io/kube-proxy => k8s.io/kube-proxy v0.24.6
 	k8s.io/kube-scheduler => k8s.io/kube-scheduler v0.24.6
 	k8s.io/kubectl => k8s.io/kubectl v0.24.6
-	k8s.io/kubelet => github.com/kubewharf/kubelet v1.24.6-kubewharf-pre.1
+	k8s.io/kubelet => github.com/kubewharf/kubelet v1.24.6-kubewharf-pre.3
 	k8s.io/kubernetes => k8s.io/kubernetes v1.24.6
 	k8s.io/legacy-cloud-providers => k8s.io/legacy-cloud-providers v0.24.6
 	k8s.io/metrics => k8s.io/metrics v0.24.6
