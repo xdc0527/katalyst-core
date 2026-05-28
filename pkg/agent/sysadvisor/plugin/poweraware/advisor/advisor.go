@@ -161,6 +161,21 @@ func (p *powerAwareAdvisor) run(ctx context.Context) {
 	p.emitCurrentPowerUSage(currentWatts)
 	p.emitPowerSpec(powerSpec)
 
+	// If actual power is below the budget, check whether to gradually raise frequency.
+	// When actual < budget*80%: issue a Raise step and skip normal reconcile this cycle.
+	// When actual in [budget*90%, budget]: within acceptable range, no action needed.
+	if currentWatts < powerSpec.Budget {
+		if tryRaiseFreq(ctx, currentWatts, powerSpec.Budget, p.powerCapper) {
+			// A raise instruction was sent; skip reconcile to avoid conflicting actions.
+			return
+		}
+		// In the hold zone (80%–90% of budget): actual is close enough, no reconcile needed.
+		if shouldStopRaise(currentWatts, powerSpec.Budget) {
+			general.InfofV(6, "pap: actual power %dW within 10%% of budget %dW, holding", currentWatts, powerSpec.Budget)
+			return
+		}
+	}
+
 	freqCapped, err := p.reconciler.Reconcile(ctx, powerSpec, currentWatts)
 	if err != nil {
 		p.emitErrorCode(powermetric.ErrorCodeRecoverable)

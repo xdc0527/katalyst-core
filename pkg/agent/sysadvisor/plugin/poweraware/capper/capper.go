@@ -24,6 +24,9 @@ type PowerCapper interface {
 	Stop() error
 	Reset()
 	Cap(ctx context.Context, targetWatts, currWatt int)
+	// Raise gradually restores CPU frequency when actual power is well below budget.
+	// targetWatts must be greater than currWatt (opposite direction of Cap).
+	Raise(ctx context.Context, targetWatts, currWatt int)
 }
 
 // noopCapper is placeholder for disabled power capping server
@@ -48,6 +51,8 @@ func (n noopCapper) Init() error {
 func (n noopCapper) Reset() {}
 
 func (n noopCapper) Cap(ctx context.Context, targetWatts, currWatt int) {}
+
+func (n noopCapper) Raise(ctx context.Context, targetWatts, currWatt int) {}
 
 func NewNoopCapper() PowerCapper {
 	return &noopCapper{}

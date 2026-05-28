@@ -293,6 +293,36 @@ func (p *powerCapService) Cap(ctx context.Context, targetWatts, currWatt int) {
 	p.longPoller.setDataUpdated()
 }
 
+// Raise gradually restores CPU frequency when actual power is well below the budget.
+// It sends an OpRaise instruction (targetWatts > currWatt) to the QRM plugin.
+func (p *powerCapService) Raise(ctx context.Context, targetWatts, currWatt int) {
+	raiseInst, err := capper.NewRaiseInstruction(targetWatts, currWatt)
+	if err != nil {
+		klog.Warningf("pap: invalid raise request: %v", err)
+		p.emitErrorCode(powermetric.ErrorCodeOther)
+		return
+	}
+
+	if p.notify.IsEmpty() {
+		klog.Warningf("pap: no power capping plugin connected; Raise op from %d to %d watt is lost", currWatt, targetWatts)
+		p.emitErrorCode(powermetric.ErrorCodePowerCapperUnavailable)
+	}
+
+	p.Lock()
+	defer p.Unlock()
+
+	if !p.started {
+		general.Warningf("pap: power capping service is unavailable")
+		p.emitErrorCode(powermetric.ErrorCodePowerCapperUnavailable)
+		return
+	}
+
+	p.emitPowerCapInstruction(raiseInst)
+	p.capInstruction = raiseInst
+	p.notify.Notify()
+	p.longPoller.setDataUpdated()
+}
+
 func newPowerCapService(emitter metrics.MetricEmitter) *powerCapService {
 	return &powerCapService{
 		notify:  newNotifier(),

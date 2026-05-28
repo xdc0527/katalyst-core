@@ -35,6 +35,9 @@ const (
 	OpCap     PowerCapOpCode = "4"
 	OpReset   PowerCapOpCode = "-1"
 	OpUnknown PowerCapOpCode = "-2"
+	// OpRaise instructs the QRM plugin to raise CPU frequency toward the target watt.
+	// It is the opposite direction of OpCap: targetWatts > currWatt.
+	OpRaise PowerCapOpCode = "5"
 )
 
 var PowerCapReset = &CapInstruction{
@@ -175,6 +178,22 @@ func NewCapInstruction(targetWatts, currWatt int) (*CapInstruction, error) {
 
 	return &CapInstruction{
 		OpCode:          OpCap,
+		OpCurrentValue:  fmt.Sprintf("%d", currWatt),
+		OpTargetValue:   fmt.Sprintf("%d", targetWatts),
+		RawTargetValue:  targetWatts,
+		RawCurrentValue: currWatt,
+	}, nil
+}
+
+// NewRaiseInstruction creates a CapInstruction with OpRaise to gradually restore CPU frequency.
+// targetWatts must be strictly greater than currWatt.
+func NewRaiseInstruction(targetWatts, currWatt int) (*CapInstruction, error) {
+	if targetWatts <= currWatt {
+		return nil, errors.New("invalid power raise request: targetWatts must be greater than currWatt")
+	}
+
+	return &CapInstruction{
+		OpCode:          OpRaise,
 		OpCurrentValue:  fmt.Sprintf("%d", currWatt),
 		OpTargetValue:   fmt.Sprintf("%d", targetWatts),
 		RawTargetValue:  targetWatts,
