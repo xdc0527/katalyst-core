@@ -234,3 +234,87 @@ func TestSetRecommendationAppliedCondition(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckPodVolumeResizePending(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		pod         *v1.Pod
+		expectedRes bool
+	}{
+		{
+			name: "no resize requested",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "pod1",
+					Namespace:   "default",
+					Annotations: map[string]string{},
+				},
+			},
+			expectedRes: false,
+		},
+		{
+			name: "resize requested, actual missing",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pod2",
+					Namespace: "default",
+					Annotations: map[string]string{
+						apiconsts.PodAnnotationInplaceUpdateVolumesKey: `{"vol1":{"space":"10Gi"}}`,
+					},
+				},
+			},
+			expectedRes: true,
+		},
+		{
+			name: "resize requested, actual match",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pod3",
+					Namespace: "default",
+					Annotations: map[string]string{
+						apiconsts.PodAnnotationInplaceUpdateVolumesKey: `{"vol1":{"space":"10Gi","iops":"100"}}`,
+						podAnnotationLocalDiskRequestKey:               `{"vol1":{"space":"10Gi","iops":"100"}}`,
+					},
+				},
+			},
+			expectedRes: false,
+		},
+		{
+			name: "resize requested, actual mismatch space",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pod4",
+					Namespace: "default",
+					Annotations: map[string]string{
+						apiconsts.PodAnnotationInplaceUpdateVolumesKey: `{"vol1":{"space":"10Gi"}}`,
+						podAnnotationLocalDiskRequestKey:               `{"vol1":{"space":"5Gi"}}`,
+					},
+				},
+			},
+			expectedRes: true,
+		},
+		{
+			name: "resize requested, actual mismatch volume not found",
+			pod: &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pod5",
+					Namespace: "default",
+					Annotations: map[string]string{
+						apiconsts.PodAnnotationInplaceUpdateVolumesKey: `{"vol1":{"space":"10Gi"}}`,
+						podAnnotationLocalDiskRequestKey:               `{"vol2":{"space":"10Gi"}}`,
+					},
+				},
+			},
+			expectedRes: true,
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			res := checkPodVolumeResizePending(tc.pod)
+			assert.Equal(t, tc.expectedRes, res)
+		})
+	}
+}

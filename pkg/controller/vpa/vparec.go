@@ -395,7 +395,9 @@ func (rec *VerticalPodAutoScaleRecommendationController) syncVPARec(key string) 
 		return err
 	}
 
-	if err := rec.updateVPAStatus(vpa, podResources, containerResources); err != nil {
+	volumeResources := convertVolumeRecommendationsToStatus(vpaRec.Spec.VolumeRecommendations)
+
+	if err := rec.updateVPAStatus(vpa, podResources, containerResources, volumeResources); err != nil {
 		klog.Errorf("[vpa-rec] update vpa resource for vpa %s error: %v", vpa.Name, err)
 		return err
 	}
@@ -441,11 +443,12 @@ func (rec *VerticalPodAutoScaleRecommendationController) clearVPAAnnotations(vpa
 
 // updateVPAStatus is used to set status for vpa
 func (rec *VerticalPodAutoScaleRecommendationController) updateVPAStatus(vpa *apis.KatalystVerticalPodAutoscaler,
-	vpaPodResources []apis.PodResources, vpaContainerResources []apis.ContainerResources,
+	vpaPodResources []apis.PodResources, vpaContainerResources []apis.ContainerResources, vpaVolumeResources []apis.VolumeResources,
 ) error {
 	vpaNew := vpa.DeepCopy()
 	vpaNew.Status.PodResources = vpaPodResources
 	vpaNew.Status.ContainerResources = vpaContainerResources
+	vpaNew.Status.VolumeResources = vpaVolumeResources
 	if apiequality.Semantic.DeepEqual(vpaNew.Status, vpa.Status) {
 		return nil
 	}
@@ -456,6 +459,32 @@ func (rec *VerticalPodAutoScaleRecommendationController) updateVPAStatus(vpa *ap
 		return err
 	}
 	return nil
+}
+
+// convertVolumeRecommendationsToStatus converts RecommendedVolumeResources from vpaRec spec
+// into VolumeResources for the VPA status.
+func convertVolumeRecommendationsToStatus(recommendations []apis.RecommendedVolumeResources) []apis.VolumeResources {
+	if len(recommendations) == 0 {
+		return nil
+	}
+	result := make([]apis.VolumeResources, 0, len(recommendations))
+	for _, rec := range recommendations {
+		vr := apis.VolumeResources{VolumeName: rec.VolumeName}
+		if rec.Requests != nil {
+			vr.Requests = &apis.ContainerResourceList{
+				Target:         rec.Requests.Resources,
+				UncappedTarget: rec.Requests.Resources,
+			}
+		}
+		if rec.Limits != nil {
+			vr.Limits = &apis.ContainerResourceList{
+				Target:         rec.Limits.Resources,
+				UncappedTarget: rec.Limits.Resources,
+			}
+		}
+		result = append(result, vr)
+	}
+	return result
 }
 
 // updateVPAStatus is used to set status for vpaRec

@@ -627,6 +627,80 @@ func TestVPAControllerSyncPod(t *testing.T) {
 			pod:    pod1,
 			newPod: newPod1,
 		},
+		{
+			name: "test volume resize annotation matching spec.resourcePolicy.volumePolicies",
+			vpa: &apis.KatalystVerticalPodAutoscaler{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "vpa1",
+					Namespace: "default",
+					UID:       "vpauid1",
+				},
+				Spec: apis.KatalystVerticalPodAutoscalerSpec{
+					TargetRef: apis.CrossVersionObjectReference{
+						Kind:       "StatefulSet",
+						APIVersion: "apps/v1",
+						Name:       "sts1",
+					},
+					UpdatePolicy: apis.PodUpdatePolicy{
+						PodUpdatingStrategy: apis.PodUpdatingStrategyInplace,
+						PodMatchingStrategy: apis.PodMatchingStrategyAll,
+					},
+					ResourcePolicy: apis.PodResourcePolicy{
+						VolumePolicies: []apis.VolumeResourcePolicy{
+							{
+								VolumeName: pointer.String("vol1"),
+							},
+						},
+					},
+				},
+				Status: apis.KatalystVerticalPodAutoscalerStatus{
+					VolumeResources: []apis.VolumeResources{
+						{
+							VolumeName: pointer.String("vol1"),
+							Requests: &apis.ContainerResourceList{
+								Target: v1.ResourceList{
+									"space": resource.MustParse("10Gi"),
+									"iops":  resource.MustParse("100"),
+								},
+							},
+						},
+					},
+					Conditions: []apis.VerticalPodAutoscalerCondition{
+						{
+							Type:   apis.RecommendationUpdated,
+							Status: v1.ConditionTrue,
+							Reason: util.VPAConditionReasonUpdated,
+						},
+					},
+				},
+			},
+			object: &appsv1.StatefulSet{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "StatefulSet",
+					APIVersion: "apps/v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sts1",
+					Namespace: "default",
+					Annotations: map[string]string{
+						apiconsts.WorkloadAnnotationVPAEnabledKey: apiconsts.WorkloadAnnotationVPAEnabled,
+					},
+				},
+				Spec: appsv1.StatefulSetSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"workload": "sts1",
+						},
+					},
+				},
+			},
+			pod: pod1,
+			newPod: func() *v1.Pod {
+				p := pod1.DeepCopy()
+				p.Annotations[apiconsts.PodAnnotationInplaceUpdateVolumesKey] = `{"vol1":{"iops":"100","space":"10Gi"}}`
+				return p
+			}(),
+		},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -1006,4 +1080,40 @@ func TestSyncPerformance(t *testing.T) {
 		err = vc.syncVPA("default" + "/" + "vpa1")
 		assert.NoError(t, err)
 	}
+}
+
+func TestGenerateVolumeAnnotationFromStatus(t *testing.T) {
+	t.Parallel()
+
+	volumeResources := []apis.VolumeResources{
+		{
+			VolumeName: pointer.String("vol1"),
+			Requests: &apis.ContainerResourceList{
+				Target: v1.ResourceList{
+					"space": resource.MustParse("10Gi"),
+					"iops":  resource.MustParse("100"),
+				},
+			},
+		},
+		{
+			VolumeName: pointer.String("vol2"),
+			Requests: &apis.ContainerResourceList{
+				Target: v1.ResourceList{
+					"space": resource.MustParse("5Gi"),
+				},
+			},
+		},
+	}
+
+	result := generateVolumeAnnotationFromStatus(volumeResources)
+
+	assert.NotNil(t, result)
+	assert.Len(t, result, 2)
+
+	assert.Contains(t, result, "vol1")
+	assert.Equal(t, "10Gi", result["vol1"]["space"])
+	assert.Equal(t, "100", result["vol1"]["iops"])
+
+	assert.Contains(t, result, "vol2")
+	assert.Equal(t, "5Gi", result["vol2"]["space"])
 }

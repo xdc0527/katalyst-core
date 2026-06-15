@@ -18,6 +18,7 @@ package vpa
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 
 	apis "github.com/kubewharf/katalyst-api/pkg/apis/autoscaling/v1alpha1"
 	autoscalelister "github.com/kubewharf/katalyst-api/pkg/client/listers/autoscaling/v1alpha1"
+	apiconsts "github.com/kubewharf/katalyst-api/pkg/consts"
 	katalyst_base "github.com/kubewharf/katalyst-core/cmd/base"
 	"github.com/kubewharf/katalyst-core/pkg/client/control"
 	"github.com/kubewharf/katalyst-core/pkg/config/controller"
@@ -46,6 +48,10 @@ import (
 
 const (
 	metricNameVAPControlVPAUpdateStatusCosts = "vpa_vpa_update_resource_costs"
+
+	// podAnnotationLocalDiskRequestKey is the annotation key set by godel scheduler that records
+	// the current local-disk resources (space and iops) actually allocated to the pod's volumes.
+	podAnnotationLocalDiskRequestKey = "godel.bytedance.com/local_disk_request"
 )
 
 type vpaStatusController struct {
@@ -336,6 +342,9 @@ func (vs *vpaStatusController) setRecommendationAppliedCondition(vpa *apis.Katal
 		if !katalystutil.CheckPodSpecUpdated(pod) {
 			failedCount += 1
 		}
+		if checkPodVolumeResizePending(pod) {
+			failedCount += 1
+		}
 	}
 
 	if failedCount == 0 {
@@ -351,4 +360,59 @@ func (vs *vpaStatusController) setRecommendationAppliedCondition(vpa *apis.Katal
 		}
 	}
 	return nil
+}
+
+// checkPodVolumeResizePending returns true if the pod's volume resize is not yet applied,
+// by comparing the recommended volumes in PodAnnotationInplaceUpdateVolumesKey against the
+// actual allocated volumes in podAnnotationLocalDiskRequestKey (godel.bytedance.com/local_disk_request).
+//
+// The local_disk_request annotation value is a JSON object mapping volumeName to resource map,
+// same format as the resize-volumes annotation:
+//
+//	{ "<volumeName>": { "space": "<qty>", "iops": "<qty>" } }
+func checkPodVolumeResizePending(pod *v1.Pod) bool {
+	recommendedRaw, ok := pod.Annotations[apiconsts.PodAnnotationInplaceUpdateVolumesKey]
+	if !ok || recommendedRaw == "" {
+		// No volume resize requested, nothing to check.
+		return false
+	}
+
+	actualRaw, ok := pod.Annotations[podAnnotationLocalDiskRequestKey]
+	if !ok || actualRaw == "" {
+		// Recommended exists but actual is not yet set — resize pending.
+		return true
+	}
+
+	var recommended map[string]map[string]string
+	if err := json.Unmarshal([]byte(recommendedRaw), &recommended); err != nil {
+		klog.Warningf("[vpa-status] pod %s/%s: failed to parse %s annotation: %v",
+			pod.Namespace, pod.Name, apiconsts.PodAnnotationInplaceUpdateVolumesKey, err)
+		return false
+	}
+
+	var actual map[string]map[string]string
+	if err := json.Unmarshal([]byte(actualRaw), &actual); err != nil {
+		klog.Warningf("[vpa-status] pod %s/%s: failed to parse %s annotation: %v",
+			pod.Namespace, pod.Name, podAnnotationLocalDiskRequestKey, err)
+		return false
+	}
+
+	for volumeName, recResources := range recommended {
+		actualResources, found := actual[volumeName]
+		if !found {
+			klog.V(5).Infof("[vpa-status] pod %s/%s: volume %s not found in local_disk_request annotation",
+				pod.Namespace, pod.Name, volumeName)
+			return true
+		}
+		for _, key := range []string{"space", "iops"} {
+			recVal, recHas := recResources[key]
+			actualVal, actualHas := actualResources[key]
+			if recHas && (!actualHas || recVal != actualVal) {
+				klog.V(5).Infof("[vpa-status] pod %s/%s: volume %s %s mismatch: recommended=%s actual=%s",
+					pod.Namespace, pod.Name, volumeName, key, recVal, actualVal)
+				return true
+			}
+		}
+	}
+	return false
 }

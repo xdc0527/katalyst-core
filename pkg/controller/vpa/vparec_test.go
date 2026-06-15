@@ -550,3 +550,32 @@ func TestVPARecControllerSyncVPARec(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertVolumeRecommendationsToStatus(t *testing.T) {
+	t.Parallel()
+
+	recs := []apis.RecommendedVolumeResources{
+		{
+			VolumeName: pointer.String("vol1"),
+			Requests: &apis.RecommendedRequestResources{
+				Resources: v1.ResourceList{
+					"space": resource.MustParse("10Gi"),
+					"iops":  resource.MustParse("100"),
+				},
+			},
+			Limits: &apis.RecommendedRequestResources{
+				Resources: v1.ResourceList{
+					"space": resource.MustParse("20Gi"),
+				},
+			},
+		},
+	}
+
+	result := convertVolumeRecommendationsToStatus(recs)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "vol1", *result[0].VolumeName)
+	assert.Equal(t, resource.MustParse("10Gi"), result[0].Requests.Target["space"])
+	assert.Equal(t, resource.MustParse("10Gi"), result[0].Requests.UncappedTarget["space"])
+	assert.Equal(t, resource.MustParse("100"), result[0].Requests.Target["iops"])
+	assert.Equal(t, resource.MustParse("20Gi"), result[0].Limits.Target["space"])
+}

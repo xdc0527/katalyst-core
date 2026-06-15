@@ -80,8 +80,9 @@ type VPAController struct {
 	podUpdater      control.PodUpdater
 	workloadControl control.UnstructuredControl
 
-	vpaIndexer cache.Indexer
-	podIndexer cache.Indexer
+	vpaIndexer    cache.Indexer
+	podIndexer    cache.Indexer
+	vpaRecIndexer cache.Indexer
 
 	// workloadLister stores all the dynamic informers the controller needs,
 	// while vpaEnabledWorkload stores all the workload that be enabled with vpa
@@ -115,6 +116,7 @@ func NewVPAController(ctx context.Context, controlCtx *katalyst_base.GenericCont
 		conf:               vpaConf,
 		vpaIndexer:         vpaInformer.Informer().GetIndexer(),
 		podIndexer:         podInformer.Informer().GetIndexer(),
+		vpaRecIndexer:      vpaRecInformer.Informer().GetIndexer(),
 		podLister:          podInformer.Lister(),
 		vpaLister:          vpaInformer.Lister(),
 		vpaRecLister:       vpaRecInformer.Lister(),
@@ -668,6 +670,14 @@ func (vc *VPAController) patchPodResources(vpa *apis.KatalystVerticalPodAutoscal
 		}
 	}
 
+	// If the VPA spec contains volumePolicies, apply volume recommendations from vpaRec as pod annotation.
+	if len(vpa.Spec.ResourcePolicy.VolumePolicies) > 0 {
+		if err := vc.patchPodVolumeAnnotation(vpa, podCopy); err != nil {
+			klog.Errorf("[vpa] failed to patch volume annotation for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+			return err
+		}
+	}
+
 	if !apiequality.Semantic.DeepEqual(pod.Annotations, podCopy.Annotations) {
 		podUpdater := vc.podUpdater
 		if vpa == nil || vpa.Spec.UpdatePolicy.PodUpdatingStrategy == apis.PodUpdatingStrategyOff {
@@ -683,4 +693,52 @@ func (vc *VPAController) patchPodResources(vpa *apis.KatalystVerticalPodAutoscal
 	}
 
 	return nil
+}
+
+// patchPodVolumeAnnotation reads VolumeResources from the VPA status (populated by VPARecommendationController)
+// and sets the PodAnnotationInplaceUpdateVolumesKey annotation on podCopy.
+// The annotation value is a JSON object: { "<volumeName>": { "<resource>": "<quantity>" } }
+func (vc *VPAController) patchPodVolumeAnnotation(vpa *apis.KatalystVerticalPodAutoscaler, podCopy *core.Pod) error {
+	volumeAnnotation := generateVolumeAnnotationFromStatus(vpa.Status.VolumeResources)
+	if len(volumeAnnotation) == 0 {
+		delete(podCopy.Annotations, apiconsts.PodAnnotationInplaceUpdateVolumesKey)
+		return nil
+	}
+
+	marshalledVolumeAnnotation, err := json.Marshal(volumeAnnotation)
+	if err != nil {
+		return fmt.Errorf("failed to marshal volume annotation for vpa %s: %v", vpa.Name, err)
+	}
+
+	if podCopy.Annotations == nil {
+		podCopy.Annotations = make(map[string]string)
+	}
+	podCopy.Annotations[apiconsts.PodAnnotationInplaceUpdateVolumesKey] = string(marshalledVolumeAnnotation)
+	return nil
+}
+
+// generateVolumeAnnotationFromStatus converts []apis.VolumeResources from the VPA status into
+// the annotation map: { "<volumeName>": { "<resource>": "<quantity>" } }
+func generateVolumeAnnotationFromStatus(volumeResources []apis.VolumeResources) map[string]map[string]string {
+	if len(volumeResources) == 0 {
+		return nil
+	}
+
+	result := make(map[string]map[string]string, len(volumeResources))
+	for _, vr := range volumeResources {
+		if vr.VolumeName == nil {
+			continue
+		}
+		volumeName := *vr.VolumeName
+		resourceMap := make(map[string]string)
+		if vr.Requests != nil {
+			for resourceName, quantity := range vr.Requests.Target {
+				resourceMap[string(resourceName)] = quantity.String()
+			}
+		}
+		if len(resourceMap) > 0 {
+			result[volumeName] = resourceMap
+		}
+	}
+	return result
 }
