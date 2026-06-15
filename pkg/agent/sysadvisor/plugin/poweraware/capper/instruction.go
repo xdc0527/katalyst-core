@@ -172,10 +172,6 @@ func GetCappingInstructionsFromCalculationInfo(calcInfos []*advisorsvc.Calculati
 }
 
 func NewCapInstruction(targetWatts, currWatt int) (*CapInstruction, error) {
-	if targetWatts >= currWatt {
-		return nil, errors.New("invalid power cap request")
-	}
-
 	return &CapInstruction{
 		OpCode:          OpCap,
 		OpCurrentValue:  fmt.Sprintf("%d", currWatt),

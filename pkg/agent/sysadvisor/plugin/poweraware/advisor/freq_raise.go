@@ -86,6 +86,6 @@ func tryRaiseFreq(ctx context.Context, actualWatt, budget int, powerCapper cappe
 	// actualWatt < budget * 80%: issue a raise step
 	target := calcRaiseTarget(actualWatt, budget)
 	general.Infof("pap: freq raise: actual=%dW < budget*80%%=%dW; raising target to %dW", actualWatt, budget*freqRaiseLowerThresholdPercent/100, target)
-	powerCapper.Raise(ctx, target, actualWatt)
+	powerCapper.Cap(ctx, target, actualWatt)
 	return true
 }
