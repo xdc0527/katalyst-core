@@ -27,7 +27,7 @@ import (
 )
 
 // malachite realtime power metric server imposes delay of up to 2 seconds coupled with sampling interval of 1 sec
-const powerTolerationTime = 3 * time.Second
+const powerTolerationTime = 10 * time.Second
 
 type NodeMetricGetter interface {
 	GetNodeMetric(metricName string) (utilmetric.MetricData, error)
