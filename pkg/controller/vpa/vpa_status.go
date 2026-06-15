@@ -339,10 +339,7 @@ func (vs *vpaStatusController) setRecommendationAppliedCondition(vpa *apis.Katal
 		}
 
 		activePodCount += 1
-		if !katalystutil.CheckPodSpecUpdated(pod) {
-			failedCount += 1
-		}
-		if checkPodVolumeResizePending(pod) {
+		if !katalystutil.CheckPodSpecUpdated(pod) || checkPodVolumeResizePending(pod) {
 			failedCount += 1
 		}
 	}
@@ -404,7 +401,7 @@ func checkPodVolumeResizePending(pod *v1.Pod) bool {
 				pod.Namespace, pod.Name, volumeName)
 			return true
 		}
-		for _, key := range []string{"space", "iops"} {
+		for _, key := range []string{"space", "iops", "readRatio"} {
 			recVal, recHas := recResources[key]
 			actualVal, actualHas := actualResources[key]
 			if recHas && (!actualHas || recVal != actualVal) {
